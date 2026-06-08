@@ -12,6 +12,7 @@
  *   GET      /badgzip        — Content-Encoding: gzip but garbage bytes
  *   GET      /hang           — headers + 1 chunk, then silent forever
  *   POST     /reset          — destroys socket mid-body
+ *   POST     /v1/chat/completions — tool-use-shaped bounded JSON (rewrite showcase)
  *   GET      /__seen         — returns last recorded request info as JSON
  */
 
@@ -158,6 +159,28 @@ const server = http.createServer(async (req, res) => {
     // Return the most-recent recorded request (last path that was hit),
     // or the full seen map so callers can look up any path.
     const body = JSON.stringify(seen, null, 2);
+    res.writeHead(200, {
+      'Content-Type': 'application/json',
+      'Content-Length': Buffer.byteLength(body),
+    });
+    res.end(body);
+    return;
+  }
+
+  // ── /v1/chat/completions ── tool-use-shaped bounded JSON (rewrite showcase) ─
+  if (url === '/v1/chat/completions') {
+    await readBody(req);
+    const body = JSON.stringify({
+      id: 'chatcmpl-mock',
+      object: 'chat.completion',
+      choices: [
+        {
+          index: 0,
+          message: { role: 'assistant', content: null, tool_calls: [] },
+          finish_reason: 'tool_calls',
+        },
+      ],
+    });
     res.writeHead(200, {
       'Content-Type': 'application/json',
       'Content-Length': Buffer.byteLength(body),

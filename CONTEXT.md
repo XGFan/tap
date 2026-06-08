@@ -35,7 +35,9 @@ _Avoid_: filter, condition, selector
 
 **Rewrite**:
 The action side of a Rewrite Rule — the transformation applied to a body once a
-Match succeeds.
+Match succeeds (`regexReplace` or `setBody`). Replacement text is mostly literal
+but may contain the `{{now:FORMAT}}` token, expanded to the live server time at
+apply time (see [[0002-dynamic-now-token-in-rewrite-replacements]]).
 _Avoid_: mutate, patch, edit
 
 **Bounded Response**:

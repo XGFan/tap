@@ -15,6 +15,7 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import zlib from 'node:zlib';
+import { showcaseRules } from '../showcase/rules.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..', '..');
@@ -991,6 +992,55 @@ async function checkRW_rewriteRules() {
   await httpPut(cfgUrl, { baseUrl: 'http://localhost:9090', rewriteRules: [], captureBodyLimitBytes: 5000000 });
 }
 
+async function checkSHOW_showcaseRules() {
+  console.log('\n[SHOW] Showcase rules (hello->tooluse, time->{{now}})');
+  const cfgUrl = 'http://localhost:8080/__gateway/api/config';
+  await httpPut(cfgUrl, { baseUrl: 'http://localhost:9090', rewriteRules: showcaseRules });
+  await sleep(100);
+
+  // SHOW1: request "hello" -> echo tool_use injected; control (no hello) stays [].
+  try {
+    const ctrl = await httpPost('http://localhost:8080/v1/chat/completions',
+      JSON.stringify({ messages: [{ role: 'user', content: 'hi there' }] }), { 'Content-Type': 'application/json' });
+    const hit = await httpPost('http://localhost:8080/v1/chat/completions',
+      JSON.stringify({ messages: [{ role: 'user', content: 'hello, help me' }] }), { 'Content-Type': 'application/json' });
+    const ctrlCalls = JSON.parse(ctrl.body).choices[0].message.tool_calls;
+    const hitCalls = JSON.parse(hit.body).choices[0].message.tool_calls;
+    const ctrlEmpty = Array.isArray(ctrlCalls) && ctrlCalls.length === 0;
+    const hitEcho = Array.isArray(hitCalls) && hitCalls.some(
+      (c) => c?.function?.name === 'echo' && /hello world/.test(c?.function?.arguments ?? ''));
+    if (ctrlEmpty && hitEcho) {
+      pass('SHOW1', 'hello -> echo tool_use injected into response',
+        `control tool_calls=[]; hello tool_calls=${JSON.stringify(hitCalls)}`);
+    } else {
+      fail('SHOW1', 'hello -> echo tool_use injected into response',
+        `ctrlEmpty=${ctrlEmpty} hitEcho=${hitEcho} hitBody=${hit.body}`);
+    }
+  } catch (e) { fail('SHOW1', 'hello -> echo tool_use', String(e)); }
+
+  // SHOW2: request "time" -> live {{now}} timestamp in forwarded request body.
+  try {
+    const tsRe = /\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}/;
+    const ctrl = await httpPost('http://localhost:8080/json',
+      JSON.stringify({ q: 'hello world' }), { 'Content-Type': 'application/json' });
+    const hit = await httpPost('http://localhost:8080/json',
+      JSON.stringify({ q: 'what time is it' }), { 'Content-Type': 'application/json' });
+    const ctrlEcho = JSON.stringify(JSON.parse(ctrl.body).echo);
+    const hitEcho = JSON.stringify(JSON.parse(hit.body).echo);
+    const ctrlUnchanged = ctrlEcho.includes('hello world') && !tsRe.test(ctrlEcho);
+    const hitRewritten = tsRe.test(hitEcho) && !hitEcho.includes('time');
+    if (ctrlUnchanged && hitRewritten) {
+      pass('SHOW2', 'time -> {{now}} live timestamp in forwarded request',
+        `control upstream echo=${ctrlEcho}; rewritten upstream echo=${hitEcho}`);
+    } else {
+      fail('SHOW2', 'time -> {{now}} live timestamp',
+        `ctrlUnchanged=${ctrlUnchanged} hitRewritten=${hitRewritten} hitEcho=${hitEcho}`);
+    }
+  } catch (e) { fail('SHOW2', 'time -> {{now}}', String(e)); }
+
+  await httpPut(cfgUrl, { baseUrl: 'http://localhost:9090', rewriteRules: [] });
+}
+
 // ── report writer ──────────────────────────────────────────────────────────
 
 async function writeReport() {
@@ -1058,6 +1108,7 @@ async function main() {
   await checkC3_coldStart();
   await checkB1_base64Body();
   await checkRW_rewriteRules();
+  await checkSHOW_showcaseRules();
 
   console.log('\n[teardown] Stopping servers...');
   await teardown();

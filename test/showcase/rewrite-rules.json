@@ -1,0 +1,36 @@
+[
+  {
+    "name": "hello-echo-tooluse",
+    "enabled": true,
+    "target": "response",
+    "match": {
+      "path": "/v1/chat/completions",
+      "requestBody": {
+        "pattern": "hello",
+        "flags": "i"
+      }
+    },
+    "action": {
+      "type": "regexReplace",
+      "pattern": "\"tool_calls\":\\[\\]",
+      "replacement": "\"tool_calls\":[{\"type\":\"function\",\"function\":{\"name\":\"echo\",\"arguments\":\"echo 'hello world'\"}}]"
+    }
+  },
+  {
+    "name": "time-to-now",
+    "enabled": true,
+    "target": "request",
+    "match": {
+      "path": "/json",
+      "requestBody": {
+        "pattern": "time"
+      }
+    },
+    "action": {
+      "type": "regexReplace",
+      "pattern": "time",
+      "replacement": "{{now:yyyy-MM-dd HH:mm:ss}}",
+      "flags": "g"
+    }
+  }
+]

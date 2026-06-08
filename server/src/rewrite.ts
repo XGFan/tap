@@ -1,10 +1,11 @@
 import type { RewriteRule, RewriteAnnotation } from './types.js';
 
 /**
- * Pure Rewrite Rule engine. No I/O, no proxy/stream coupling — it takes already
- * decoded body text plus exchange metadata and returns the rewritten text. The
- * proxy owns buffering, decode/encode, and logging; this module owns only
- * matching and the ordered-pipeline rewrite.
+ * Rewrite Rule engine. No proxy/stream coupling — it takes already decoded body
+ * text plus exchange metadata and returns the rewritten text. The proxy owns
+ * buffering, decode/encode, and logging; this module owns only matching and the
+ * ordered-pipeline rewrite. The sole side effect is reading the clock to expand
+ * the {{now}} replacement token (see expandNowTokens).
  *
  * Failure isolation is total: any rule whose match or action throws is skipped
  * (fail-open), so a malformed rule can never break the proxy path.
@@ -95,12 +96,41 @@ function staticMatch(rule: RewriteRule, ctx: MatchContext): boolean {
   return true;
 }
 
+/** Format the current local time against a token pattern (yyyy MM dd HH mm ss
+ * SSS). The one clock read in this module — kept here so action replacements can
+ * inject a live timestamp via the {{now}} token. */
+function formatNow(fmt: string): string {
+  const d = new Date();
+  const pad = (n: number, w = 2): string => String(n).padStart(w, '0');
+  const map: Record<string, string> = {
+    yyyy: String(d.getFullYear()),
+    MM: pad(d.getMonth() + 1),
+    dd: pad(d.getDate()),
+    HH: pad(d.getHours()),
+    mm: pad(d.getMinutes()),
+    ss: pad(d.getSeconds()),
+    SSS: pad(d.getMilliseconds(), 3),
+  };
+  return fmt.replace(/yyyy|SSS|MM|dd|HH|mm|ss/g, (t) => map[t] ?? t);
+}
+
+/** Expand {{now}} / {{now:FORMAT}} tokens in an action replacement to the live
+ * server-local time. Bare {{now}} defaults to "yyyy-MM-dd HH:mm:ss". Strings
+ * without the token are returned untouched (literal replacements still work). */
+function expandNowTokens(s: string): string {
+  if (!s.includes('{{now')) return s;
+  return s.replace(/\{\{now(?::([^}]*))?\}\}/g, (_m, fmt: string | undefined) =>
+    formatNow(fmt && fmt.length > 0 ? fmt : 'yyyy-MM-dd HH:mm:ss'),
+  );
+}
+
 /** Apply a single action to text. regexReplace honours $-backrefs and the g
- * flag; setBody replaces the whole body. */
+ * flag; setBody replaces the whole body. Both expand {{now}} tokens first, so a
+ * timestamp injected this way carries no `$` and never disturbs backref handling. */
 function applyAction(action: RewriteRule['action'], text: string): string {
-  if (action.type === 'setBody') return action.value;
+  if (action.type === 'setBody') return expandNowTokens(action.value);
   const re = new RegExp(action.pattern, action.flags);
-  return text.replace(re, action.replacement);
+  return text.replace(re, expandNowTokens(action.replacement));
 }
 
 /**

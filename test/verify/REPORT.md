@@ -1,6 +1,6 @@
 # Gateway E2E Verification Report
 
-Generated: 2026-06-08T03:52:44.743Z
+Generated: 2026-06-08T04:09:23.446Z
 
 ## Summary
 
@@ -29,8 +29,10 @@ Generated: 2026-06-08T03:52:44.743Z
 | RW6 Body predicate no-match -> original (no rewrite) | ✅ PASS |
 | RW7 Over-cap bounded response not rewritten (stream-through) | ✅ PASS |
 | RW8 Non-decodable response -> fail-open (original bytes, gateway alive) | ✅ PASS |
+| SHOW1 hello -> echo tool_use injected into response | ✅ PASS |
+| SHOW2 time -> {{now}} live timestamp in forwarded request | ✅ PASS |
 
-**PASS: 23 / FAIL: 0 / NOTE: 0 / Total: 23**
+**PASS: 25 / FAIL: 0 / NOTE: 0 / Total: 25**
 
 ---
 
@@ -46,7 +48,7 @@ status=200 body={"ok":true,"echo":{"x":1}} content-type=application/json
 ### C2a — SSE streaming low-latency + capture
 **✅ PASS**
 
-firstByteMs=103 events=true jsonl.streaming=true bodyExcerpt="data: {\"i\":0}\n\ndata: {\"i\":1}\n\ndata: {\"i\":2}\n\ndata: [DONE]\n\n"
+firstByteMs=105 events=true jsonl.streaming=true bodyExcerpt="data: {\"i\":0}\n\ndata: {\"i\":1}\n\ndata: {\"i\":2}\n\ndata: [DONE]\n\n"
 
 ---
 
@@ -67,14 +69,14 @@ authorization=kept host=localhost:9090 client-Connection-not-echoed=true (undici
 ### C4 — JSONL integrity
 **✅ PASS**
 
-10 new lines written, all valid ExchangeRecord shape. Sample id=01KTJNRM0N2QNC9EP2CBHSV4XC
+10 new lines written, all valid ExchangeRecord shape. Sample id=01KTJPQ20TEN22PWHWE5T20V6T
 
 ---
 
 ### C5 — Runtime config no-restart
 **✅ PASS**
 
-PID=12571 unchanged, request hit :9091, config.json baseUrl="http://localhost:9091"
+PID=20558 unchanged, request hit :9091, config.json baseUrl="http://localhost:9091"
 
 ---
 
@@ -123,7 +125,7 @@ status=200 clientBytes=6 bodyDecodable=false bodyEncoding=base64
 ### AR1 — Timeout reaping: /hang reaped, /sse NOT reaped
 **✅ PASS**
 
-/hang: status=0 elapsed=2502ms error="upstream_timeout" reaped=true; /sse: completed=true; gateway alive=true
+/hang: status=0 elapsed=2506ms error="upstream_timeout" reaped=true; /sse: completed=true; gateway alive=true
 
 ---
 
@@ -194,4 +196,18 @@ cap=5 body={"ok":true,"echo":null}
 **✅ PASS**
 
 clientBytes=7; bodyDecodable=false; meta.rewrites=undefined; alive=true
+
+---
+
+### SHOW1 — hello -> echo tool_use injected into response
+**✅ PASS**
+
+control tool_calls=[]; hello tool_calls=[{"type":"function","function":{"name":"echo","arguments":"echo 'hello world'"}}]
+
+---
+
+### SHOW2 — time -> {{now}} live timestamp in forwarded request
+**✅ PASS**
+
+control upstream echo={"q":"hello world"}; rewritten upstream echo={"q":"what 2026-06-08 12:09:22 is it"}
 
