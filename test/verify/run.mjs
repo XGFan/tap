@@ -56,6 +56,25 @@ function httpGet(url, reqHeaders = {}) {
   });
 }
 
+/** HTTP GET returning the RAW body Buffer (for binary/compressed responses). */
+function httpGetRaw(url, reqHeaders = {}) {
+  return new Promise((resolve, reject) => {
+    const u = new URL(url);
+    const req = http.request(
+      { hostname: u.hostname, port: u.port, path: u.pathname + u.search, method: 'GET', headers: reqHeaders },
+      (res) => {
+        const chunks = [];
+        res.on('data', (c) => chunks.push(c));
+        res.on('end', () =>
+          resolve({ status: res.statusCode, headers: res.headers, body: Buffer.concat(chunks) }),
+        );
+      },
+    );
+    req.on('error', reject);
+    req.end();
+  });
+}
+
 /** HTTP POST helper. */
 function httpPost(url, body, reqHeaders = {}) {
   return new Promise((resolve, reject) => {
@@ -807,6 +826,171 @@ async function checkB1_base64Body() {
   }
 }
 
+async function checkRW_rewriteRules() {
+  console.log('\n[RW] Rewrite Rules');
+  const cfgUrl = 'http://localhost:8080/__gateway/api/config';
+  const setRules = (rules, extra = {}) =>
+    httpPut(cfgUrl, { baseUrl: 'http://localhost:9090', rewriteRules: rules, ...extra });
+
+  // RW1: request body rewrite reaches upstream + logged original/rewritten/meta.
+  try {
+    await setRules([{ name: 'req-upgrade', enabled: true, target: 'request',
+      match: { path: '/json', requestBody: { pattern: 'gpt-4' } },
+      action: { type: 'regexReplace', pattern: 'gpt-4', replacement: 'gpt-4o', flags: 'g' } }]);
+    await sleep(100);
+    const before = (await readTodayLog()).length;
+    const res = await httpPost('http://localhost:8080/json', '{"model":"gpt-4"}', { 'Content-Type': 'application/json' });
+    await sleep(300);
+    const rec = (await readTodayLog()).slice(before).find((r) => r.path === '/json');
+    const echoRewritten = res.body.includes('gpt-4o') && !res.body.includes('"gpt-4"');
+    const logRewritten = rec?.request?.body?.includes('gpt-4o') === true;
+    const logOriginal = rec?.request?.originalBody?.includes('"gpt-4"') === true && !rec?.request?.originalBody?.includes('gpt-4o');
+    const metaOk = Array.isArray(rec?.meta?.rewrites) && rec.meta.rewrites.some((x) => x.name === 'req-upgrade' && x.target === 'request');
+    if (echoRewritten && logRewritten && logOriginal && metaOk) {
+      pass('RW1', 'Request body rewrite reaches upstream + logged',
+        `upstream echo=${res.body}; req.body=${rec?.request?.body}; req.originalBody=${rec?.request?.originalBody}; meta=${JSON.stringify(rec?.meta?.rewrites)}`);
+    } else {
+      fail('RW1', 'Request body rewrite reaches upstream + logged',
+        `echoRewritten=${echoRewritten} logRewritten=${logRewritten} logOriginal=${logOriginal} metaOk=${metaOk}\n    echo=${res.body} req=${JSON.stringify(rec?.request)}`);
+    }
+  } catch (e) { fail('RW1', 'Request body rewrite', String(e)); }
+
+  // RW2: bounded response rewrite reaches client + Content-Length recomputed.
+  try {
+    await setRules([{ name: 'resp-flip', enabled: true, target: 'response',
+      match: { path: '/json' },
+      action: { type: 'regexReplace', pattern: '"ok":true', replacement: '"ok":false' } }]);
+    await sleep(100);
+    const before = (await readTodayLog()).length;
+    const res = await httpGet('http://localhost:8080/json');
+    await sleep(300);
+    const rec = (await readTodayLog()).slice(before).find((r) => r.path === '/json');
+    const bodyRewritten = res.body.includes('"ok":false');
+    const clOk = String(Buffer.byteLength(res.body)) === String(res.headers['content-length']);
+    const logRewritten = rec?.response?.body?.includes('"ok":false') === true;
+    const logOriginal = rec?.response?.originalBody?.includes('"ok":true') === true;
+    const metaOk = Array.isArray(rec?.meta?.rewrites) && rec.meta.rewrites.some((x) => x.name === 'resp-flip');
+    if (bodyRewritten && clOk && logRewritten && logOriginal && metaOk) {
+      pass('RW2', 'Bounded response rewrite reaches client + Content-Length',
+        `client body=${res.body}; content-length=${res.headers['content-length']} actual=${Buffer.byteLength(res.body)}; log.originalBody=${rec?.response?.originalBody}`);
+    } else {
+      fail('RW2', 'Bounded response rewrite reaches client + Content-Length',
+        `bodyRewritten=${bodyRewritten} clOk=${clOk}(cl=${res.headers['content-length']} actual=${Buffer.byteLength(res.body)}) logRewritten=${logRewritten} logOriginal=${logOriginal} metaOk=${metaOk}`);
+    }
+  } catch (e) { fail('RW2', 'Bounded response rewrite', String(e)); }
+
+  // RW3: gzip response re-encoded to ORIGINAL Content-Encoding; client decodes it.
+  try {
+    await setRules([{ name: 'gz-rw', enabled: true, target: 'response',
+      match: { path: '/gzip' },
+      action: { type: 'regexReplace', pattern: 'hello gzip', replacement: 'HELLO REWRITTEN' } }]);
+    await sleep(100);
+    const raw = await httpGetRaw('http://localhost:8080/gzip');
+    const ceGzip = raw.headers['content-encoding'] === 'gzip';
+    let decoded = '';
+    try { decoded = zlib.gunzipSync(raw.body).toString('utf8'); } catch {}
+    const decodedRewritten = decoded.includes('HELLO REWRITTEN');
+    const clOk = String(raw.body.length) === String(raw.headers['content-length']);
+    if (ceGzip && decodedRewritten && clOk) {
+      pass('RW3', 'gzip response re-encoded to original Content-Encoding',
+        `content-encoding=${raw.headers['content-encoding']}; content-length=${raw.headers['content-length']} actualBytes=${raw.body.length}; gunzip(body)=${decoded}`);
+    } else {
+      fail('RW3', 'gzip response re-encoded to original Content-Encoding',
+        `ceGzip=${ceGzip} decodedRewritten=${decodedRewritten} clOk=${clOk}(cl=${raw.headers['content-length']} actual=${raw.body.length}) decoded=${decoded}`);
+    }
+  } catch (e) { fail('RW3', 'gzip response re-encode', String(e)); }
+
+  // RW4: SSE passes through untouched even when a rule's metadata matches.
+  try {
+    await setRules([{ name: 'sse-clobber', enabled: true, target: 'response',
+      match: { path: '/sse' }, action: { type: 'setBody', value: 'CLOBBERED' } }]);
+    await sleep(100);
+    const before = (await readTodayLog()).length;
+    const res = await httpPost('http://localhost:8080/sse', '');
+    await sleep(400);
+    const rec = (await readTodayLog()).slice(before).find((r) => r.path === '/sse');
+    const intact = res.body.includes('data: [DONE]') && !res.body.includes('CLOBBERED');
+    const noRewrite = !rec?.meta?.rewrites;
+    const streaming = rec?.streaming === true;
+    if (intact && noRewrite && streaming) {
+      pass('RW4', 'SSE passes through untouched (never buffered)',
+        `body intact (has [DONE], no CLOBBERED); streaming=${streaming}; meta.rewrites=${JSON.stringify(rec?.meta?.rewrites)}`);
+    } else {
+      fail('RW4', 'SSE passes through untouched', `intact=${intact} noRewrite=${noRewrite} streaming=${streaming}`);
+    }
+  } catch (e) { fail('RW4', 'SSE passthrough', String(e)); }
+
+  // RW5: non-SSE stream with no Content-Length (gemini) passes through untouched.
+  try {
+    await setRules([{ name: 'gem-clobber', enabled: true, target: 'response',
+      match: { path: '/gemini-stream' }, action: { type: 'setBody', value: 'CLOBBERED' } }]);
+    await sleep(100);
+    const res = await httpPost('http://localhost:8080/gemini-stream', '');
+    const intact = res.body === '[{"a":1},{"b":2},{"c":3}]';
+    if (intact) pass('RW5', 'Non-SSE stream (no Content-Length) passes through untouched', `body=${res.body}`);
+    else fail('RW5', 'Non-SSE stream (no Content-Length) passes through untouched', `body=${res.body}`);
+  } catch (e) { fail('RW5', 'gemini-stream passthrough', String(e)); }
+
+  // RW6: gate matches metadata but responseBody predicate fails -> original sent.
+  try {
+    await setRules([{ name: 'no-body-match', enabled: true, target: 'response',
+      match: { path: '/json', responseBody: { pattern: 'NOTPRESENT' } },
+      action: { type: 'setBody', value: 'CLOBBERED' } }]);
+    await sleep(100);
+    const before = (await readTodayLog()).length;
+    const res = await httpGet('http://localhost:8080/json');
+    await sleep(200);
+    const rec = (await readTodayLog()).slice(before).find((r) => r.path === '/json');
+    const original = res.body.includes('"ok":true') && !res.body.includes('CLOBBERED');
+    const noRewrite = !rec?.meta?.rewrites && rec?.response?.originalBody === undefined;
+    if (original && noRewrite) {
+      pass('RW6', 'Body predicate no-match -> original (no rewrite)',
+        `client body=${res.body}; meta.rewrites=${JSON.stringify(rec?.meta?.rewrites)}`);
+    } else {
+      fail('RW6', 'Body predicate no-match -> original',
+        `original=${original} noRewrite=${noRewrite} body=${res.body} originalBody=${JSON.stringify(rec?.response?.originalBody)}`);
+    }
+  } catch (e) { fail('RW6', 'Body predicate no-match', String(e)); }
+
+  // RW7: bounded response over the buffer cap -> stream-through, no rewrite.
+  try {
+    await setRules([{ name: 'cap-rw', enabled: true, target: 'response',
+      match: { path: '/json' },
+      action: { type: 'regexReplace', pattern: '"ok":true', replacement: '"ok":false' } }], { captureBodyLimitBytes: 5 });
+    await sleep(100);
+    const res = await httpGet('http://localhost:8080/json');
+    const original = res.body.includes('"ok":true') && !res.body.includes('"ok":false');
+    if (original) pass('RW7', 'Over-cap bounded response not rewritten (stream-through)', `cap=5 body=${res.body}`);
+    else fail('RW7', 'Over-cap bounded response not rewritten', `body=${res.body}`);
+    await httpPut(cfgUrl, { baseUrl: 'http://localhost:9090', captureBodyLimitBytes: 5000000 });
+  } catch (e) { fail('RW7', 'Over-cap response', String(e)); }
+
+  // RW8: non-decodable (badgzip) bounded response with a rule -> fail-open.
+  try {
+    await setRules([{ name: 'bad-rw', enabled: true, target: 'response',
+      match: { path: '/badgzip' }, action: { type: 'setBody', value: 'CLOBBERED' } }]);
+    await sleep(100);
+    const before = (await readTodayLog()).length;
+    const raw = await httpGetRaw('http://localhost:8080/badgzip');
+    await sleep(200);
+    const rec = (await readTodayLog()).slice(before).find((r) => r.path === '/badgzip');
+    const notClobbered = raw.body.toString('latin1') !== 'CLOBBERED';
+    const noRewrite = !rec?.meta?.rewrites;
+    const health = await httpGet('http://localhost:8080/json');
+    const alive = health.status === 200;
+    if (notClobbered && noRewrite && alive) {
+      pass('RW8', 'Non-decodable response -> fail-open (original bytes, gateway alive)',
+        `clientBytes=${raw.body.length}; bodyDecodable=${rec?.response?.bodyDecodable}; meta.rewrites=${JSON.stringify(rec?.meta?.rewrites)}; alive=${alive}`);
+    } else {
+      fail('RW8', 'Non-decodable response -> fail-open',
+        `notClobbered=${notClobbered} noRewrite=${noRewrite} alive=${alive}`);
+    }
+  } catch (e) { fail('RW8', 'Non-decodable response fail-open', String(e)); }
+
+  // Clear rewrite rules + restore cap so the run leaves clean config.
+  await httpPut(cfgUrl, { baseUrl: 'http://localhost:9090', rewriteRules: [], captureBodyLimitBytes: 5000000 });
+}
+
 // ── report writer ──────────────────────────────────────────────────────────
 
 async function writeReport() {
@@ -873,6 +1057,7 @@ async function main() {
   await checkAR1_timeoutReaping();
   await checkC3_coldStart();
   await checkB1_base64Body();
+  await checkRW_rewriteRules();
 
   console.log('\n[teardown] Stopping servers...');
   await teardown();

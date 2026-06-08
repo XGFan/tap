@@ -1,6 +1,6 @@
 # Gateway E2E Verification Report
 
-Generated: 2026-06-08T02:06:47.835Z
+Generated: 2026-06-08T03:52:44.743Z
 
 ## Summary
 
@@ -21,8 +21,16 @@ Generated: 2026-06-08T02:06:47.835Z
 | AR1 Timeout reaping: /hang reaped, /sse NOT reaped | ✅ PASS |
 | C3 Cold start 503 | ✅ PASS |
 | B1 Non-UTF8 body→base64, UTF-8 body→utf8 | ✅ PASS |
+| RW1 Request body rewrite reaches upstream + logged | ✅ PASS |
+| RW2 Bounded response rewrite reaches client + Content-Length | ✅ PASS |
+| RW3 gzip response re-encoded to original Content-Encoding | ✅ PASS |
+| RW4 SSE passes through untouched (never buffered) | ✅ PASS |
+| RW5 Non-SSE stream (no Content-Length) passes through untouched | ✅ PASS |
+| RW6 Body predicate no-match -> original (no rewrite) | ✅ PASS |
+| RW7 Over-cap bounded response not rewritten (stream-through) | ✅ PASS |
+| RW8 Non-decodable response -> fail-open (original bytes, gateway alive) | ✅ PASS |
 
-**PASS: 15 / FAIL: 0 / NOTE: 0 / Total: 15**
+**PASS: 23 / FAIL: 0 / NOTE: 0 / Total: 23**
 
 ---
 
@@ -38,14 +46,14 @@ status=200 body={"ok":true,"echo":{"x":1}} content-type=application/json
 ### C2a — SSE streaming low-latency + capture
 **✅ PASS**
 
-firstByteMs=104 events=true jsonl.streaming=true bodyExcerpt="data: {\"i\":0}\n\ndata: {\"i\":1}\n\ndata: {\"i\":2}\n\ndata: [DONE]\n\n"
+firstByteMs=103 events=true jsonl.streaming=true bodyExcerpt="data: {\"i\":0}\n\ndata: {\"i\":1}\n\ndata: {\"i\":2}\n\ndata: [DONE]\n\n"
 
 ---
 
 ### C2b — Gemini-stream low-latency + capture
 **✅ PASS**
 
-firstByteMs=7 bodyOk=true jsonl.streaming=true
+firstByteMs=2 bodyOk=true jsonl.streaming=true
 
 ---
 
@@ -59,14 +67,14 @@ authorization=kept host=localhost:9090 client-Connection-not-echoed=true (undici
 ### C4 — JSONL integrity
 **✅ PASS**
 
-10 new lines written, all valid ExchangeRecord shape. Sample id=01KTJFPS6Z0M04BQ993HWBBSWW
+10 new lines written, all valid ExchangeRecord shape. Sample id=01KTJNRM0N2QNC9EP2CBHSV4XC
 
 ---
 
 ### C5 — Runtime config no-restart
 **✅ PASS**
 
-PID=87017 unchanged, request hit :9091, config.json baseUrl="http://localhost:9091"
+PID=12571 unchanged, request hit :9091, config.json baseUrl="http://localhost:9091"
 
 ---
 
@@ -115,7 +123,7 @@ status=200 clientBytes=6 bodyDecodable=false bodyEncoding=base64
 ### AR1 — Timeout reaping: /hang reaped, /sse NOT reaped
 **✅ PASS**
 
-/hang: status=0 elapsed=2031ms error="upstream_timeout" reaped=true; /sse: completed=true; gateway alive=true
+/hang: status=0 elapsed=2502ms error="upstream_timeout" reaped=true; /sse: completed=true; gateway alive=true
 
 ---
 
@@ -130,4 +138,60 @@ status=503 body={"error":"upstream_not_configured"} jsonl.error="upstream_not_co
 **✅ PASS**
 
 binary body: bodyEncoding="base64"; utf8 body: bodyEncoding="utf8"
+
+---
+
+### RW1 — Request body rewrite reaches upstream + logged
+**✅ PASS**
+
+upstream echo={"ok":true,"echo":{"model":"gpt-4o"}}; req.body={"model":"gpt-4o"}; req.originalBody={"model":"gpt-4"}; meta=[{"name":"req-upgrade","target":"request","action":"regexReplace"}]
+
+---
+
+### RW2 — Bounded response rewrite reaches client + Content-Length
+**✅ PASS**
+
+client body={"ok":false,"echo":null}; content-length=24 actual=24; log.originalBody={"ok":true,"echo":null}
+
+---
+
+### RW3 — gzip response re-encoded to original Content-Encoding
+**✅ PASS**
+
+content-encoding=gzip; content-length=64 actualBytes=64; gunzip(body)={"compressed":true,"data":"HELLO REWRITTEN"}
+
+---
+
+### RW4 — SSE passes through untouched (never buffered)
+**✅ PASS**
+
+body intact (has [DONE], no CLOBBERED); streaming=true; meta.rewrites=undefined
+
+---
+
+### RW5 — Non-SSE stream (no Content-Length) passes through untouched
+**✅ PASS**
+
+body=[{"a":1},{"b":2},{"c":3}]
+
+---
+
+### RW6 — Body predicate no-match -> original (no rewrite)
+**✅ PASS**
+
+client body={"ok":true,"echo":null}; meta.rewrites=undefined
+
+---
+
+### RW7 — Over-cap bounded response not rewritten (stream-through)
+**✅ PASS**
+
+cap=5 body={"ok":true,"echo":null}
+
+---
+
+### RW8 — Non-decodable response -> fail-open (original bytes, gateway alive)
+**✅ PASS**
+
+clientBytes=7; bodyDecodable=false; meta.rewrites=undefined; alive=true
 

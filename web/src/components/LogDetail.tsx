@@ -63,22 +63,51 @@ function BodyBlock({
   truncated,
   decodable,
   contentType,
+  originalBody,
+  originalBodyEncoding,
 }: {
   body: string | null
   encoding: string
   truncated: boolean
   decodable?: boolean
   contentType?: string
+  originalBody?: string | null
+  originalBodyEncoding?: string
 }) {
   // Hooks must run before any early return.
   const [view, setView] = useState<'tree' | 'raw'>('tree')
+  const [source, setSource] = useState<'rewritten' | 'original'>('rewritten')
 
-  if (body === null) {
-    return <p style={{ color: '#888', fontSize: 12, margin: 0 }}>No body captured</p>
+  // originalBody is present ONLY when a Rewrite Rule changed this body.
+  const wasRewritten = originalBody !== undefined
+  const showingOriginal = wasRewritten && source === 'original'
+  const activeBody = showingOriginal ? originalBody ?? null : body
+  const activeEncoding = showingOriginal ? originalBodyEncoding ?? 'utf8' : encoding
+
+  const sourceToggle = wasRewritten ? (
+    <button
+      className="copy-btn"
+      onClick={() => setSource((s) => (s === 'rewritten' ? 'original' : 'rewritten'))}
+    >
+      {source === 'rewritten' ? 'Show original' : 'Show rewritten'}
+    </button>
+  ) : null
+
+  if (activeBody === null) {
+    return (
+      <div className="body-section">
+        <div className="body-section-label">
+          Body
+          {wasRewritten && <span className="badge badge-rewrite">rewritten</span>}
+          {sourceToggle}
+        </div>
+        <p style={{ color: '#888', fontSize: 12, margin: 0 }}>No body captured</p>
+      </div>
+    )
   }
 
-  const isBase64 = encoding === 'base64'
-  const trimmed = body.trimStart()
+  const isBase64 = activeEncoding === 'base64'
+  const trimmed = activeBody.trimStart()
   const looksJson =
     !isBase64 &&
     ((contentType?.includes('json') ?? false) ||
@@ -86,22 +115,24 @@ function BodyBlock({
       trimmed.startsWith('['))
 
   const { parsed, pretty, isJson } = looksJson
-    ? parseJsonBody(body)
-    : { parsed: null, pretty: body, isJson: false }
+    ? parseJsonBody(activeBody)
+    : { parsed: null, pretty: activeBody, isJson: false }
 
   // The tree view only makes sense for objects/arrays — top-level JSON
   // primitives (a bare string/number) fall back to the raw text view.
   const treeable = isJson && parsed !== null && typeof parsed === 'object'
-  const displayText = isJson ? pretty : body
+  const displayText = isJson ? pretty : activeBody
   const showTree = treeable && view === 'tree'
 
   return (
     <div className="body-section">
       <div className="body-section-label">
         Body
+        {wasRewritten && <span className="badge badge-rewrite">rewritten</span>}
         {truncated && <span className="badge badge-warn">truncated</span>}
         {isBase64 && <span className="badge badge-warn">base64</span>}
         {decodable === false && <span className="badge badge-warn">not decodable</span>}
+        {sourceToggle}
         {treeable && (
           <button
             className="copy-btn"
@@ -112,6 +143,11 @@ function BodyBlock({
         )}
         <CopyButton text={displayText} />
       </div>
+      {wasRewritten && (
+        <div style={{ fontSize: 11, color: '#888', marginBottom: 4 }}>
+          Showing <strong>{source}</strong> body
+        </div>
+      )}
       {showTree ? (
         <div className="json-tree-block">
           <JsonView
@@ -190,6 +226,14 @@ export default function LogDetail({ id, onClose }: Props) {
               {record.error && (
                 <span className="badge badge-err" title={record.error}>ERR</span>
               )}
+              {record.meta?.rewrites && record.meta.rewrites.length > 0 && (
+                <span
+                  className="badge badge-rewrite"
+                  title={record.meta.rewrites.map((r) => `${r.target}:${r.name}`).join(', ')}
+                >
+                  rewritten ×{record.meta.rewrites.length}
+                </span>
+              )}
             </div>
             <div style={{ fontSize: 12, color: '#888', marginBottom: 4 }}>
               {new Date(record.timestamp).toLocaleString()} · ID: <code>{record.id}</code>
@@ -221,6 +265,8 @@ export default function LogDetail({ id, onClose }: Props) {
                     encoding={record.request.bodyEncoding}
                     truncated={record.request.bodyTruncated}
                     contentType={record.request.headers['content-type']}
+                    originalBody={record.request.originalBody}
+                    originalBodyEncoding={record.request.originalBodyEncoding}
                   />
                 </div>
               </div>
@@ -240,6 +286,8 @@ export default function LogDetail({ id, onClose }: Props) {
                         truncated={record.response.bodyTruncated}
                         decodable={record.response.bodyDecodable}
                         contentType={record.response.headers['content-type']}
+                        originalBody={record.response.originalBody}
+                        originalBodyEncoding={record.response.originalBodyEncoding}
                       />
                     </>
                   )}

@@ -1,5 +1,121 @@
 import { z } from 'zod';
 
+/** True if pattern+flags compile to a valid RegExp. Used to reject malformed
+ * Rewrite Rules at config-load time instead of failing open at request time. */
+function isValidRegex(pattern: string, flags?: string): boolean {
+  try {
+    new RegExp(pattern, flags);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** A regex body matcher: a JS RegExp source plus optional standard flags. */
+const bodyMatchSchema = z.object({
+  pattern: z.string(),
+  flags: z.string().optional(),
+});
+
+/**
+ * The predicate side of a Rewrite Rule. All fields optional and AND-combined.
+ * `path` is a glob (e.g. "/v1/chat/*"); `contentType` is a substring; `status`
+ * and `responseBody` are only meaningful for response-target rules. Body
+ * matchers run against the DECODED UTF-8 body.
+ */
+const rewriteMatchSchema = z.object({
+  method: z.array(z.string()).optional(),
+  path: z.string().optional(),
+  status: z.array(z.number().int()).optional(),
+  contentType: z.string().optional(),
+  requestBody: bodyMatchSchema.optional(),
+  responseBody: bodyMatchSchema.optional(),
+});
+
+/**
+ * The action side of a Rewrite Rule. `regexReplace` does a (optionally global)
+ * regex substitution with $-backrefs; `setBody` replaces the whole body. Both
+ * operate on the decoded UTF-8 body; the action carries its OWN regex, decoupled
+ * from the match.
+ */
+const rewriteActionSchema = z.discriminatedUnion('type', [
+  z.object({
+    type: z.literal('regexReplace'),
+    pattern: z.string(),
+    replacement: z.string(),
+    flags: z.string().optional(),
+  }),
+  z.object({
+    type: z.literal('setBody'),
+    value: z.string(),
+  }),
+]);
+
+/**
+ * A declarative match -> rewrite rule. `target` selects which body is rewritten
+ * (and the direction): a request-target rule rewrites the body forwarded
+ * upstream; a response-target rule rewrites the body sent to the client (only
+ * for Bounded Responses — see docs/adr/0001). Rules of the same target apply as
+ * an ordered pipeline; `stop` halts the pipeline after this rule fires.
+ */
+export const rewriteRuleSchema = z
+  .object({
+    name: z.string(),
+    enabled: z.boolean().default(true),
+    target: z.enum(['request', 'response']),
+    match: rewriteMatchSchema.default({}),
+    action: rewriteActionSchema,
+    stop: z.boolean().optional(),
+  })
+  .superRefine((rule, ctx) => {
+    // Request-target rules cannot reference response-only match fields.
+    if (rule.target === 'request') {
+      if (rule.match.responseBody !== undefined) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['match', 'responseBody'],
+          message: 'responseBody match is only valid for a response-target rule',
+        });
+      }
+      if (rule.match.status !== undefined) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['match', 'status'],
+          message: 'status match is only valid for a response-target rule',
+        });
+      }
+    }
+    // Reject malformed regexes at config-load time.
+    const rb = rule.match.requestBody;
+    if (rb && !isValidRegex(rb.pattern, rb.flags)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['match', 'requestBody', 'pattern'],
+        message: 'invalid regular expression',
+      });
+    }
+    const sb = rule.match.responseBody;
+    if (sb && !isValidRegex(sb.pattern, sb.flags)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['match', 'responseBody', 'pattern'],
+        message: 'invalid regular expression',
+      });
+    }
+    if (
+      rule.action.type === 'regexReplace' &&
+      !isValidRegex(rule.action.pattern, rule.action.flags)
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['action', 'pattern'],
+        message: 'invalid regular expression',
+      });
+    }
+  });
+
+export type RewriteRule = z.infer<typeof rewriteRuleSchema>;
+
 /**
  * Upstream configuration.
  *
@@ -37,6 +153,8 @@ export const upstreamConfigSchema = z.object({
   captureBodyLimitBytes: z.number().int().positive().default(5_000_000),
   // Cap for the captured/forwarded REQUEST body. Over this -> 413.
   captureRequestBodyLimitBytes: z.number().int().positive().default(5_000_000),
+  // Declarative match -> rewrite rules, applied in array order (see RewriteRule).
+  rewriteRules: z.array(rewriteRuleSchema).default([]),
 });
 
 export type UpstreamConfig = z.infer<typeof upstreamConfigSchema>;
@@ -71,6 +189,8 @@ export const upstreamConfigUpdateSchema = z
     bodyTimeoutMs: z.number().int().positive().optional(),
     captureBodyLimitBytes: z.number().int().positive().optional(),
     captureRequestBodyLimitBytes: z.number().int().positive().optional(),
+    // Whole-array replace on update (the UI/API submits the full rule list).
+    rewriteRules: z.array(rewriteRuleSchema).optional(),
   })
   .strict();
 
@@ -81,11 +201,15 @@ export type BodyEncoding = 'utf8' | 'base64' | 'empty';
 
 export interface RequestRecord {
   headers: Record<string, string | string[]>;
-  /** Captured request body. May be base64 when binary, or null/empty when none. */
+  /** Captured request body AS FORWARDED (post-rewrite when a rule fired). May be
+   * base64 when binary, or null/empty when none. */
   body: string | null;
   bodyEncoding: BodyEncoding;
   /** True if the request body was truncated at captureRequestBodyLimitBytes. */
   bodyTruncated: boolean;
+  /** Pre-rewrite body, present ONLY when a request Rewrite Rule changed it. */
+  originalBody?: string | null;
+  originalBodyEncoding?: BodyEncoding;
 }
 
 export interface ResponseRecord {
@@ -102,6 +226,21 @@ export interface ResponseRecord {
   bodyDecodable: boolean;
   /** True if the captured copy was truncated at captureBodyLimitBytes. */
   bodyTruncated: boolean;
+  /** Pre-rewrite body, present ONLY when a response Rewrite Rule changed it.
+   * Decoded UTF-8 (the form the rewrite operated on). */
+  originalBody?: string | null;
+  originalBodyEncoding?: BodyEncoding;
+}
+
+/**
+ * One entry in ExchangeRecord.meta.rewrites: a Rewrite Rule that fired during
+ * the exchange. The proxy writes meta.rewrites as RewriteAnnotation[] when any
+ * rule changed a body.
+ */
+export interface RewriteAnnotation {
+  name: string;
+  target: 'request' | 'response';
+  action: 'regexReplace' | 'setBody';
 }
 
 /**

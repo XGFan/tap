@@ -20,6 +20,13 @@ export interface LogSummary {
   error: string | null
 }
 
+/** One Rewrite Rule that fired during an exchange (mirrors server RewriteAnnotation). */
+export interface RewriteAnnotation {
+  name: string
+  target: 'request' | 'response'
+  action: 'regexReplace' | 'setBody'
+}
+
 export interface LogRecord {
   id: string
   timestamp: string
@@ -32,6 +39,9 @@ export interface LogRecord {
     body: string | null
     bodyEncoding: string
     bodyTruncated: boolean
+    /** Pre-rewrite body, present only when a request Rewrite Rule changed it. */
+    originalBody?: string | null
+    originalBodyEncoding?: string
   }
   response: {
     status: number
@@ -40,12 +50,17 @@ export interface LogRecord {
     bodyEncoding: string
     bodyDecodable: boolean
     bodyTruncated: boolean
+    /** Pre-rewrite body, present only when a response Rewrite Rule changed it. */
+    originalBody?: string | null
+    originalBodyEncoding?: string
   } | null
   streaming: boolean
   durationMs: number | null
   requestBytes: number | null
   responseBytes: number | null
   error: string | null
+  /** Hook/rule annotations. meta.rewrites lists the Rewrite Rules that fired. */
+  meta?: { rewrites?: RewriteAnnotation[] } & Record<string, unknown>
 }
 
 const BASE = '/__gateway/api'

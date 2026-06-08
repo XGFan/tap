@@ -4,6 +4,8 @@ import { request as undiciRequest, type Dispatcher } from 'undici';
 import { ulid } from 'ulid';
 import { getConfig } from './config.js';
 import { decodeBody } from './decode.js';
+import { encodeBody as recompressBody } from './encode.js';
+import { applyRewrites, gateMatches } from './rewrite.js';
 import { TeeTransform } from './tee.js';
 import {
   buildUpstreamUrl,
@@ -16,7 +18,9 @@ import type {
   BodyEncoding,
   ExchangeContext,
   ExchangeRecord,
+  RequestRecord,
   ResponseRecord,
+  RewriteAnnotation,
 } from './types.js';
 
 /** Headers that must NOT be echoed back to the client from the upstream. */
@@ -97,6 +101,25 @@ function getRequestBody(request: FastifyRequest): Buffer {
   return Buffer.from(JSON.stringify(body), 'utf8');
 }
 
+/** Decode a body to UTF-8 text, or null when not decodable / not valid UTF-8.
+ * The single entry point both rewrite phases use to obtain matchable text. */
+function decodeUtf8(
+  buf: Buffer,
+  contentEncoding: string | string[] | undefined,
+): string | null {
+  const d = decodeBody(buf, contentEncoding);
+  if (d.decodable && d.buffer && isValidUtf8(d.buffer)) return d.buffer.toString('utf8');
+  return null;
+}
+
+/** Append rewrite annotations onto ctx.meta.rewrites (persisted into the log). */
+function recordRewrites(ctx: ExchangeContext, annotations: RewriteAnnotation[]): void {
+  const prior = Array.isArray(ctx.meta.rewrites)
+    ? (ctx.meta.rewrites as RewriteAnnotation[])
+    : [];
+  ctx.meta.rewrites = [...prior, ...annotations];
+}
+
 /**
  * The always-stream-through proxy catch-all handler.
  *
@@ -173,14 +196,7 @@ export async function proxyHandler(
     };
     ctx.responseStatus = statusCode;
     ctx.responseHeaders = record.response.headers;
-    try {
-      await runResponseHooks(ctx, record);
-    } catch {
-      /* hooks must never break the path */
-    }
-    // Persist hook-contributed annotations (after response hooks ran).
-    if (Object.keys(ctx.meta).length > 0) record.meta = { ...ctx.meta };
-    await logExchange(record);
+    await finalizeRecord(record);
     reply.code(statusCode).type('application/json').send(body);
   };
 
@@ -215,24 +231,61 @@ export async function proxyHandler(
   } catch {
     /* hooks must never break the path */
   }
+
+  // Decoded ORIGINAL request body text — used both by request-rewrite below and
+  // by a response rule's requestBody predicate later. Decoded ONCE here. null
+  // when there is no body or it is not UTF-8-decodable.
+  const requestContentEncoding = ctx.requestHeaders['content-encoding'];
+  const requestBodyText =
+    requestBuf.length > 0 ? decodeUtf8(requestBuf, requestContentEncoding) : null;
+
+  // Request-target Rewrite Rules: rewrite the body forwarded upstream. Operates
+  // on the decoded UTF-8 body and re-encodes to the original Content-Encoding so
+  // the upstream still receives a valid wire body. Fully fail-open: any decode /
+  // match / action / re-encode failure leaves the original body untouched.
+  let requestRewritten = false;
+  if (config.rewriteRules.length > 0 && requestBodyText !== null) {
+    const outcome = applyRewrites('request', config.rewriteRules, requestBodyText, {
+      method,
+      path: pathOnly,
+      contentType: headerValue(ctx.requestHeaders['content-type']),
+    });
+    if (outcome) {
+      const reenc = recompressBody(Buffer.from(outcome.text, 'utf8'), requestContentEncoding);
+      if (reenc.encodable && reenc.buffer) {
+        ctx.requestBody = reenc.buffer;
+        requestRewritten = true;
+        recordRewrites(ctx, outcome.annotations);
+      }
+    }
+  }
+
   const outHeaders = sanitizeRequestHeaders(ctx.requestHeaders, target.host);
 
-  const reqEnc = encodeRequestBody(ctx.requestBody ?? requestBuf);
-  const requestRecord = {
+  // Forward the (possibly rewritten) body. undici recomputes Content-Length from
+  // this buffer; sanitizeRequestHeaders already dropped the client's stale one.
+  const forwardBuf = ctx.requestBody ?? requestBuf;
+  const reqEnc = encodeRequestBody(forwardBuf);
+  const requestRecord: RequestRecord = {
     headers: ctx.requestHeaders,
     body: reqEnc.body,
     bodyEncoding: reqEnc.encoding,
     bodyTruncated: false,
   };
+  if (requestRewritten) {
+    const origEnc = encodeRequestBody(requestBuf);
+    requestRecord.originalBody = origEnc.body;
+    requestRecord.originalBodyEncoding = origEnc.encoding;
+  }
 
   // (5) Issue the upstream request.
-  const hasBody = requestBuf.length > 0;
-  let upstream;
+  const hasBody = forwardBuf.length > 0;
+  let upstream: Dispatcher.ResponseData;
   try {
     upstream = await undiciRequest(target.url, {
       method: method as Dispatcher.HttpMethod,
       headers: outHeaders,
-      body: hasBody ? requestBuf : undefined,
+      body: hasBody ? forwardBuf : undefined,
       ...timeoutOptions(config),
     });
   } catch (err) {
@@ -251,16 +304,12 @@ export async function proxyHandler(
   // (4) Hijack: we own reply.raw from here. Fastify will not touch it.
   reply.hijack();
 
-  // Write status + sanitized response headers (preserving Content-Encoding).
   const contentType = headerValue(upstreamHeaders['content-type']);
   const contentLength = headerValue(upstreamHeaders['content-length']);
-  writeResponseHead(reply, upstreamStatus, upstreamHeaders);
 
-  const tee = new TeeTransform(config.captureBodyLimitBytes);
+  // Client-disconnect / socket-error safety net. Set up BEFORE either disposition
+  // (buffered or streamed) so a write to a gone client never crashes the process.
   let settled = false;
-
-  // Capture pipeline / socket errors so they never become unhandled 'error'
-  // events that crash the process (AR2).
   let clientAborted = false;
   reply.raw.on('error', (e) => {
     // ECONNRESET / EPIPE on client disconnect land here.
@@ -270,6 +319,42 @@ export async function proxyHandler(
   reply.raw.on('close', () => {
     if (!reply.raw.writableEnded) clientAborted = true;
   });
+
+  // Response-target Rewrite decision (ADR-0001). A response is buffered+rewritten
+  // ONLY when it is a Bounded Response (Content-Length present, not SSE) within
+  // the buffer cap AND a response rule's non-body predicates match at header
+  // time. Everything else keeps the zero-latency stream-through path.
+  const ctLower = (contentType ?? '').toLowerCase();
+  const isEventStreamCt = ctLower.includes('text/event-stream');
+  const clNum = contentLength !== undefined ? Number(contentLength) : NaN;
+  const bounded =
+    contentLength !== undefined &&
+    Number.isFinite(clNum) &&
+    clNum >= 0 &&
+    !isEventStreamCt;
+
+  // A response rule's requestBody predicate reasons about what the CLIENT asked
+  // for — reuse the request body text decoded once on the request side.
+  const responseGate =
+    config.rewriteRules.length > 0 &&
+    gateMatches('response', config.rewriteRules, {
+      method,
+      path: pathOnly,
+      status: upstreamStatus,
+      contentType,
+      requestBodyText,
+    });
+
+  if (bounded && clNum <= config.captureBodyLimitBytes && responseGate) {
+    settled = true; // the buffered path owns terminal disposition
+    await bufferRewriteAndFinalize(requestBodyText);
+    return;
+  }
+
+  // ── stream-through path: write head, then tee+pipe unbuffered ───────────────
+  writeResponseHead(reply, upstreamStatus, upstreamHeaders);
+
+  const tee = new TeeTransform(config.captureBodyLimitBytes);
 
   // (6) THE single forwarding pipeline. Its callback is the SOLE owner of
   // terminal disposition: compute label -> decode log copy -> build record ->
@@ -330,6 +415,16 @@ export async function proxyHandler(
       error,
     };
 
+    await finalizeRecord(record);
+
+    // Gate the explicit end (AR2): only end if not already ended/destroyed.
+    if (!reply.raw.writableEnded && !reply.raw.destroyed) {
+      reply.raw.end();
+    }
+  }
+
+  // ── shared: response hooks -> persist meta -> append to JSONL log ───────────
+  async function finalizeRecord(record: ExchangeRecord): Promise<void> {
     try {
       await runResponseHooks(ctx, record);
     } catch {
@@ -338,11 +433,124 @@ export async function proxyHandler(
     // Persist hook-contributed annotations (after response hooks ran).
     if (Object.keys(ctx.meta).length > 0) record.meta = { ...ctx.meta };
     await logExchange(record);
+  }
 
-    // Gate the explicit end (AR2): only end if not already ended/destroyed.
+  // ── terminal disposition for the buffered response-rewrite path ─────────────
+  async function bufferRewriteAndFinalize(
+    requestBodyText: string | null,
+  ): Promise<void> {
+    let captured: Buffer;
+    try {
+      captured = await collectStream(upstream.body, config.captureBodyLimitBytes);
+    } catch (err) {
+      // Upstream stream broke (or lied about Content-Length beyond the cap). We
+      // send no body, so advertise Content-Length: 0 rather than the upstream's
+      // stale length (which would leave the response malformed to the client).
+      const error = classifyError(err, 'stream');
+      if (!reply.raw.headersSent) {
+        writeResponseHead(reply, upstreamStatus, upstreamHeaders, 0);
+      }
+      if (!reply.raw.writableEnded && !reply.raw.destroyed) reply.raw.end();
+      await finalizeRecord({
+        id,
+        timestamp,
+        method,
+        path: pathOnly,
+        query,
+        upstreamUrl: ctx.upstreamUrl,
+        request: requestRecord,
+        response: {
+          status: upstreamStatus,
+          headers: ctx.responseHeaders ?? {},
+          body: null,
+          bodyEncoding: 'empty',
+          bodyDecodable: false,
+          bodyTruncated: false,
+        },
+        streaming: false,
+        durationMs: Date.now() - startedAt,
+        requestBytes: requestBuf.length,
+        responseBytes: 0,
+        error,
+      });
+      return;
+    }
+
+    const respCE = upstreamHeaders['content-encoding'];
+    const decoded = decodeBody(captured, respCE);
+    const decodable = decoded.decodable;
+
+    let sendBuf = captured; // bytes written to the client (default: original)
+    let rewritten = false;
+    let rewrittenText: string | null = null;
+    let originalText: string | null = null;
+
+    if (decodable && decoded.buffer && isValidUtf8(decoded.buffer)) {
+      const origText = decoded.buffer.toString('utf8');
+      const outcome = applyRewrites('response', config.rewriteRules, origText, {
+        method,
+        path: pathOnly,
+        status: upstreamStatus,
+        contentType,
+        requestBodyText,
+      });
+      if (outcome) {
+        const reenc = recompressBody(Buffer.from(outcome.text, 'utf8'), respCE);
+        if (reenc.encodable && reenc.buffer) {
+          sendBuf = reenc.buffer;
+          rewritten = true;
+          rewrittenText = outcome.text;
+          originalText = origText;
+          recordRewrites(ctx, outcome.annotations);
+        }
+      }
+    }
+
+    // Send: head with the (possibly new) Content-Length, CE preserved; then body.
+    if (!reply.raw.headersSent) {
+      writeResponseHead(reply, upstreamStatus, upstreamHeaders, sendBuf.length);
+    }
     if (!reply.raw.writableEnded && !reply.raw.destroyed) {
+      reply.raw.write(sendBuf);
       reply.raw.end();
     }
+
+    // Log copy: rewritten text (utf8) when rewritten, else the decoded original
+    // (base64 when not decodable) — mirrors the streamed path's semantics.
+    const enc =
+      rewritten && rewrittenText !== null
+        ? encodeBody(Buffer.from(rewrittenText, 'utf8'), true)
+        : encodeBody(decodable && decoded.buffer ? decoded.buffer : captured, decodable);
+
+    const response: ResponseRecord = {
+      status: upstreamStatus,
+      headers: ctx.responseHeaders ?? {},
+      body: enc.body,
+      bodyEncoding: enc.encoding,
+      bodyDecodable: decodable,
+      bodyTruncated: false,
+    };
+    if (rewritten && originalText !== null) {
+      const oenc = encodeBody(Buffer.from(originalText, 'utf8'), true);
+      response.originalBody = oenc.body;
+      response.originalBodyEncoding = oenc.encoding;
+    }
+
+    await finalizeRecord({
+      id,
+      timestamp,
+      method,
+      path: pathOnly,
+      query,
+      upstreamUrl: ctx.upstreamUrl,
+      request: requestRecord,
+      response,
+      streaming: false,
+      durationMs: Date.now() - startedAt,
+      requestBytes: requestBuf.length,
+      responseBytes: sendBuf.length,
+      error: null,
+    });
   }
 
   // ── terminal disposition for connect/DNS/TLS/timeout BEFORE streaming ───────
@@ -353,7 +561,8 @@ export async function proxyHandler(
       code === 'upstream_timeout'
         ? { error: 'upstream_timeout' }
         : { error: 'upstream_unreachable' };
-    await finalizeEarly(statusCode, code, requestBuf, false, bodyObj);
+    // Log the body we actually attempted to forward (post request-rewrite).
+    await finalizeEarly(statusCode, code, ctx.requestBody ?? requestBuf, false, bodyObj);
   }
 }
 
@@ -404,19 +613,44 @@ function headerValue(v: string | string[] | undefined): string | undefined {
 
 /**
  * Write the status line + response headers to the raw socket, preserving the
- * upstream Content-Encoding untouched and dropping hop-by-hop headers.
+ * upstream Content-Encoding untouched and dropping hop-by-hop headers. When
+ * `contentLength` is given, the upstream Content-Length is replaced with it (the
+ * buffered-rewrite path changed the body size but kept its Content-Encoding).
  */
 function writeResponseHead(
   reply: FastifyReply,
   status: number,
   headers: Record<string, string | string[] | undefined>,
+  contentLength?: number,
 ): void {
   const out: Record<string, string | string[]> = {};
   for (const [k, v] of Object.entries(headers)) {
     if (v === undefined) continue;
     const key = k.toLowerCase();
     if (RESPONSE_HOP_BY_HOP.has(key)) continue;
+    if (contentLength !== undefined && key === 'content-length') continue;
     out[k] = v;
   }
+  if (contentLength !== undefined) out['content-length'] = String(contentLength);
   reply.raw.writeHead(status, out);
+}
+
+/**
+ * Collect a readable body fully into one Buffer. Throws if the total exceeds
+ * `cap` — a safety net against an upstream that under-reports Content-Length;
+ * the caller treats that as a stream error and fails closed for that exchange.
+ */
+async function collectStream(
+  stream: AsyncIterable<Buffer | string | Uint8Array>,
+  cap: number,
+): Promise<Buffer> {
+  const chunks: Buffer[] = [];
+  let total = 0;
+  for await (const chunk of stream) {
+    const b = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    total += b.length;
+    if (total > cap) throw new Error('response exceeded buffer cap');
+    chunks.push(b);
+  }
+  return Buffer.concat(chunks, total);
 }
