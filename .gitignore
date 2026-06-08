@@ -1,0 +1,9 @@
+node_modules
+config.json
+logs/
+dist
+.omc
+*.log
+.DS_Store
+.playwright-cli/
+.sisyphus/
