@@ -1,0 +1,62 @@
+# tap —— LLM 网关。Woodpecker CI：构建 linux/amd64 镜像推送到
+# docker.test4x.com/xgfan/tap，再把 k3s 的 Deployment 滚动到新的 8 位 SHA。
+# 对齐 homelab app CI 约定（见 github.com/XGFan/{pio,chrome-proxy}）。
+# 组织级 secret（docker_username / docker_password / kubeconfig / bark_token）
+# 由 org 继承，无需 repo 级 secret。镜像在 infra 仓库的 k8s/apps/tap/tap.yaml
+# 用 :latest 作模板，本流水线按 SHA `kubectl set image` 部署。
+when:
+  branch: master
+  event: push
+
+steps:
+  - name: build
+    image: docker.test4x.com/xgfan/plugin-docker-buildx-check
+    settings:
+      repo: docker.test4x.com/xgfan/tap
+      registry: docker.test4x.com
+      tags:
+        - "${CI_COMMIT_SHA:0:8}"
+        - latest
+      platforms: linux/amd64
+      mtu: 1450
+      cache_from: docker.test4x.com/xgfan/tap:cache
+      cache_to: docker.test4x.com/xgfan/tap:cache
+      # WOODPECKER_ENVIRONMENT 注入 NPM_CONFIG_REGISTRY 到 step 容器，但**不**进
+      # `docker build`；显式转成 build-arg，Dockerfile 的 ARG NPM_CONFIG_REGISTRY
+      # 才会用上集群内的 verdaccio 代理。
+      build_args_from_env:
+        - NPM_CONFIG_REGISTRY
+      username:
+        from_secret: docker_username
+      password:
+        from_secret: docker_password
+
+  - name: deploy
+    image: bitnami/kubectl:latest
+    commands:
+      - echo "$KUBECONFIG_DATA" > /tmp/kubeconfig
+      - export KUBECONFIG=/tmp/kubeconfig
+      - kubectl set image deployment/tap tap=docker.test4x.com/xgfan/tap:$(echo $CI_COMMIT_SHA | cut -c1-8) -n default
+      - kubectl rollout status deployment/tap -n default --timeout=120s
+      - rm -f /tmp/kubeconfig
+    environment:
+      KUBECONFIG_DATA:
+        from_secret: kubeconfig
+
+  - name: notify-success
+    image: docker.test4x.com/xgfan/plugin-bark
+    failure: ignore
+    settings:
+      token:
+        from_secret: bark_token
+      status: success
+
+  - name: notify-failure
+    image: docker.test4x.com/xgfan/plugin-bark
+    failure: ignore
+    settings:
+      token:
+        from_secret: bark_token
+      status: failure
+    when:
+      - status: [failure]

@@ -14,7 +14,17 @@ const __dirname = path.dirname(__filename);
 //   <root>/server/dist/config.js  -> <root>
 //   <root>/server/src/config.ts   -> <root>
 const PROJECT_ROOT = path.resolve(__dirname, '..', '..');
-const CONFIG_PATH = path.join(PROJECT_ROOT, 'config.json');
+
+// Mutable runtime state (config.json + logs/) lives under DATA_DIR. Defaults to
+// the project root — identical to before for local dev and the E2E suite — but
+// can be relocated onto a mounted volume in containerized deploys by setting
+// TAP_DATA_DIR (e.g. a Kubernetes PVC). config.json and its temp file MUST share
+// a directory so the atomic write (temp file + rename) never crosses a
+// filesystem boundary (a cross-device rename fails with EXDEV).
+const DATA_DIR = process.env.TAP_DATA_DIR
+  ? path.resolve(process.env.TAP_DATA_DIR)
+  : PROJECT_ROOT;
+const CONFIG_PATH = path.join(DATA_DIR, 'config.json');
 
 /**
  * The single in-memory config reference. NEVER mutated in place — update()
@@ -35,10 +45,15 @@ export function getProjectRoot(): string {
   return PROJECT_ROOT;
 }
 
+/** Directory holding mutable runtime state (config.json + logs/). */
+export function getDataDir(): string {
+  return DATA_DIR;
+}
+
 /** Persist a config object to config.json atomically (temp file + rename). */
 async function persist(cfg: UpstreamConfig): Promise<void> {
   const tmp = path.join(
-    PROJECT_ROOT,
+    DATA_DIR,
     `.config.json.${process.pid}.${Date.now()}.tmp`,
   );
   const data = JSON.stringify(cfg, null, 2) + '\n';
@@ -52,6 +67,8 @@ async function persist(cfg: UpstreamConfig): Promise<void> {
  * defaults (and overwrite) rather than crash the gateway.
  */
 export async function loadConfig(): Promise<UpstreamConfig> {
+  // TAP_DATA_DIR may point at a freshly-mounted volume that does not exist yet.
+  await fs.mkdir(DATA_DIR, { recursive: true });
   try {
     const raw = await fs.readFile(CONFIG_PATH, 'utf8');
     const parsed = upstreamConfigSchema.parse(JSON.parse(raw));

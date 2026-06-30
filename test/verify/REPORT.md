@@ -1,6 +1,6 @@
 # Gateway E2E Verification Report
 
-Generated: 2026-06-08T04:09:23.446Z
+Generated: 2026-06-30T09:38:11.524Z
 
 ## Summary
 
@@ -48,14 +48,14 @@ status=200 body={"ok":true,"echo":{"x":1}} content-type=application/json
 ### C2a — SSE streaming low-latency + capture
 **✅ PASS**
 
-firstByteMs=105 events=true jsonl.streaming=true bodyExcerpt="data: {\"i\":0}\n\ndata: {\"i\":1}\n\ndata: {\"i\":2}\n\ndata: [DONE]\n\n"
+firstByteMs=103 events=true jsonl.streaming=true bodyExcerpt="data: {\"i\":0}\n\ndata: {\"i\":1}\n\ndata: {\"i\":2}\n\ndata: [DONE]\n\n"
 
 ---
 
 ### C2b — Gemini-stream low-latency + capture
 **✅ PASS**
 
-firstByteMs=2 bodyOk=true jsonl.streaming=true
+firstByteMs=6 bodyOk=true jsonl.streaming=true
 
 ---
 
@@ -69,14 +69,14 @@ authorization=kept host=localhost:9090 client-Connection-not-echoed=true (undici
 ### C4 — JSONL integrity
 **✅ PASS**
 
-10 new lines written, all valid ExchangeRecord shape. Sample id=01KTJPQ20TEN22PWHWE5T20V6T
+10 new lines written, all valid ExchangeRecord shape. Sample id=01KWBY90ATCCGFD16HB8NNBJBB
 
 ---
 
 ### C5 — Runtime config no-restart
 **✅ PASS**
 
-PID=20558 unchanged, request hit :9091, config.json baseUrl="http://localhost:9091"
+PID=14171 unchanged, request hit :9091, config.json baseUrl="http://localhost:9091"
 
 ---
 
@@ -125,7 +125,7 @@ status=200 clientBytes=6 bodyDecodable=false bodyEncoding=base64
 ### AR1 — Timeout reaping: /hang reaped, /sse NOT reaped
 **✅ PASS**
 
-/hang: status=0 elapsed=2506ms error="upstream_timeout" reaped=true; /sse: completed=true; gateway alive=true
+/hang: status=0 elapsed=2502ms error="upstream_timeout" reaped=true; /sse: completed=true; gateway alive=true
 
 ---
 
@@ -209,5 +209,5 @@ control tool_calls=[]; hello tool_calls=[{"type":"function","function":{"name":"
 ### SHOW2 — time -> {{now}} live timestamp in forwarded request
 **✅ PASS**
 
-control upstream echo={"q":"hello world"}; rewritten upstream echo={"q":"what 2026-06-08 12:09:22 is it"}
+control upstream echo={"q":"hello world"}; rewritten upstream echo={"q":"what 2026-06-30 17:38:11 is it"}
 

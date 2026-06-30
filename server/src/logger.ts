@@ -1,7 +1,7 @@
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { EventEmitter } from 'node:events';
-import { getProjectRoot } from './config.js';
+import { getDataDir } from './config.js';
 import type { ExchangeRecord } from './types.js';
 
 /**
@@ -14,7 +14,7 @@ import type { ExchangeRecord } from './types.js';
  * successful append to feed the SSE live tail (task #4).
  */
 
-export const LOG_DIR = path.join(getProjectRoot(), 'logs');
+export const LOG_DIR = path.join(getDataDir(), 'logs');
 
 /** Event bus for live-tail consumers. Emits 'exchange' with a LogSummary. */
 export const logEvents = new EventEmitter();
