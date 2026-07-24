@@ -15,7 +15,7 @@ steps:
       repo: docker.test4x.com/xgfan/tap
       registry: docker.test4x.com
       tags:
-        - "${CI_COMMIT_SHA:0:8}"
+        - "${CI_COMMIT_BRANCH}-${CI_COMMIT_SHA:0:8}-${CI_PIPELINE_STARTED}"
         - latest
       platforms: linux/amd64
       mtu: 1450
@@ -31,18 +31,8 @@ steps:
       password:
         from_secret: docker_password
 
-  - name: deploy
-    image: bitnami/kubectl:latest
-    commands:
-      - echo "$KUBECONFIG_DATA" > /tmp/kubeconfig
-      - export KUBECONFIG=/tmp/kubeconfig
-      - kubectl set image deployment/tap tap=docker.test4x.com/xgfan/tap:$(echo $CI_COMMIT_SHA | cut -c1-8) -n default
-      - kubectl rollout status deployment/tap -n default --timeout=120s
-      - rm -f /tmp/kubeconfig
-    environment:
-      KUBECONFIG_DATA:
-        from_secret: kubeconfig
-
+  # deploy 步骤已移除:改由 infra 仓库 Flux image automation 部署(ImageRepository 扫 registry →
+  # ImagePolicy 选最新 master-<sha>-<ts> → ImageUpdateAutomation 写回 infra git → apps 部署)。
   - name: notify-success
     image: docker.test4x.com/xgfan/plugin-bark
     failure: ignore
