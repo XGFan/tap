@@ -3,7 +3,7 @@
 # 对齐 homelab app CI 约定（见 github.com/XGFan/{pio,chrome-proxy}）。
 # 组织级 secret（docker_username / docker_password / kubeconfig / bark_token）
 # 由 org 继承，无需 repo 级 secret。镜像在 infra 仓库的 k8s/apps/tap/tap.yaml
-# 用 :latest 作模板，本流水线按 SHA `kubectl set image` 部署。
+# 用 :latest 作模板，本流水线只 build/push;部署由 infra Flux image automation(见 k8s/CLAUDE.md)。
 when:
   branch: master
   event: push
@@ -32,7 +32,7 @@ steps:
         from_secret: docker_password
 
   # deploy 步骤已移除:改由 infra 仓库 Flux image automation 部署(ImageRepository 扫 registry →
-  # ImagePolicy 选最新 master-<sha>-<ts> → ImageUpdateAutomation 写回 infra git → apps 部署)。
+  # ImagePolicy 选最新 master-<sha>-<num> → ImageUpdateAutomation 写回 infra git → apps 部署)。
   - name: notify-success
     image: docker.test4x.com/xgfan/plugin-bark
     failure: ignore
