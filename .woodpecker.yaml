@@ -15,7 +15,7 @@ steps:
       repo: docker.test4x.com/xgfan/tap
       registry: docker.test4x.com
       tags:
-        - "${CI_COMMIT_BRANCH}-${CI_COMMIT_SHA:0:8}-${CI_PIPELINE_STARTED}"
+        - "${CI_COMMIT_BRANCH}-${CI_COMMIT_SHA:0:8}-${CI_PIPELINE_NUMBER}"
         - latest
       platforms: linux/amd64
       mtu: 1450
