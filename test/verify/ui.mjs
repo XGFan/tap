@@ -1,6 +1,7 @@
 /**
- * ui.mjs — Browser verification for the redaction banner gate (AC5) and the
- * TTFT / token-speed readout (TS-UI).
+ * ui.mjs — Browser verification for the redaction banner gate (AC5), the
+ * per-exchange measurement readout (TS-UI), and the detail modal's layout and
+ * beautified event-stream body.
  *
  * Separate from run.mjs on purpose: run.mjs must stay dependency-free and
  * headless, while this drives a real browser. The banner gate is a DOM-level
@@ -77,9 +78,9 @@ function readPage() {
 }
 
 /**
- * Read the /tokens-sse row's TTFT and Tok/s cells, located by header text so
- * the test does not encode the column order. `rendered` is the anchor: without
- * it, "no row" and "no page" look the same.
+ * Read the /tokens-sse row's TTFT, token-count and Tok/s cells, located by
+ * header text so the test does not encode the column order. `rendered` is the
+ * anchor: without it, "no row" and "no page" look the same.
  */
 function readStatsRow() {
   const raw = pw(
@@ -93,10 +94,67 @@ function readStatsRow() {
       "var r=rows.filter(function(tr){return tr.cells[2]&&tr.cells[2].textContent.trim()==='/tokens-sse'})[0];" +
       "if(!r)return{rendered:true,heads:heads,row:null};" +
       "var c=Array.prototype.map.call(r.cells,function(td){return td.textContent.trim()});" +
-      "return{rendered:true,heads:heads,ttft:c[heads.indexOf('TTFT')],tps:c[heads.indexOf('Tok/s')]}" +
+      "return{rendered:true,heads:heads,ttft:c[heads.indexOf('TTFT')]," +
+      "inTok:c[heads.indexOf('In')],outTok:c[heads.indexOf('Out')],tps:c[heads.indexOf('Tok/s')]}" +
       "})())",
   );
   return JSON.parse(JSON.parse(raw));
+}
+
+/**
+ * Where the close button sits relative to the summary row: every child of the
+ * row whose box intersects the button's. A screenshot is the only other way to
+ * catch two absolutely-positioned things sharing a corner.
+ */
+function readCloseButtonOverlap() {
+  const raw = pw(
+    '--raw',
+    'eval',
+    "JSON.stringify((function(){" +
+      "var btn=document.querySelector('.log-detail-close');" +
+      "var row=document.querySelector('.detail-summary');" +
+      "if(!btn||!row)return{found:false};" +
+      "var b=btn.getBoundingClientRect();" +
+      "var hits=Array.prototype.slice.call(row.children).filter(function(el){" +
+      "var r=el.getBoundingClientRect();" +
+      "return r.width>0&&r.height>0&&r.left<b.right&&r.right>b.left&&r.top<b.bottom&&r.bottom>b.top})" +
+      ".map(function(el){return el.textContent.trim()});" +
+      "return{found:true,hits:hits}" +
+      "})())",
+  );
+  return JSON.parse(JSON.parse(raw));
+}
+
+/** The response pane's rendered body text and the labels of its buttons. */
+function readResponseBody() {
+  const raw = pw(
+    '--raw',
+    'eval',
+    "JSON.stringify((function(){" +
+      "var panes=document.querySelectorAll('.log-detail-modal .pane');" +
+      "var p=panes[panes.length-1];" +
+      "if(!p)return{found:false};" +
+      "var pre=p.querySelector('.code-block pre');" +
+      "var labels=Array.prototype.map.call(p.querySelectorAll('.body-section-label button')," +
+      "function(b){return b.textContent.trim()});" +
+      "return{found:true,text:pre?pre.textContent:null,labels:labels}" +
+      "})())",
+  );
+  return JSON.parse(JSON.parse(raw));
+}
+
+/** Click the response pane's format toggle (Raw <-> Beautify). */
+function toggleResponseFormat() {
+  pw(
+    'eval',
+    "(function(){" +
+      "var panes=document.querySelectorAll('.log-detail-modal .pane');" +
+      "var p=panes[panes.length-1];" +
+      "if(!p)return false;" +
+      "var b=Array.prototype.slice.call(p.querySelectorAll('.body-section-label button'))" +
+      ".filter(function(x){var t=x.textContent.trim();return t==='Raw'||t==='Beautify'})[0];" +
+      "if(b)b.click();return!!b})()",
+  );
 }
 
 /** Open the /tokens-sse row's detail modal and return its stats line text. */
@@ -212,7 +270,7 @@ async function main() {
     }
     pw('unroute');
 
-    console.log('\n[UI] TTFT + token speed readout');
+    console.log('\n[UI] Measurement readout + detail modal');
 
     // One real exchange through the gateway to a usage-reporting upstream.
     await putConfig({ baseUrl: `http://localhost:${MOCK_PORT}` });
@@ -226,27 +284,65 @@ async function main() {
     pw('reload');
     await sleep(1500);
 
-    // UI4 — the log table shows the measured TTFT and rate for that exchange.
+    // UI4 — the log table shows that exchange's TTFT, token counts and rate.
     const row = readStatsRow();
+    const cells = `TTFT=${JSON.stringify(row.ttft)} In=${JSON.stringify(row.inTok)} ` +
+      `Out=${JSON.stringify(row.outTok)} Tok/s=${JSON.stringify(row.tps)}`;
     if (!row.rendered) {
-      fail('UI4', 'Log table shows TTFT + Tok/s', 'log table did not render');
+      fail('UI4', 'Log table shows TTFT, token counts + Tok/s', 'log table did not render');
     } else if (row.row === null) {
-      fail('UI4', 'Log table shows TTFT + Tok/s',
+      fail('UI4', 'Log table shows TTFT, token counts + Tok/s',
         `no /tokens-sse row; headers=${JSON.stringify(row.heads)}`);
-    } else if (/^\d+ms$/.test(row.ttft) && Number(row.tps) > 0) {
-      pass('UI4', 'Log table shows TTFT + Tok/s', `TTFT=${row.ttft} Tok/s=${row.tps}`);
+    } else if (/^\d+ms$/.test(row.ttft) && row.inTok === '25' && row.outTok === '120' &&
+        Number(row.tps) > 0) {
+      pass('UI4', 'Log table shows TTFT, token counts + Tok/s', cells);
     } else {
-      fail('UI4', 'Log table shows TTFT + Tok/s',
-        `TTFT=${JSON.stringify(row.ttft)} Tok/s=${JSON.stringify(row.tps)} headers=${JSON.stringify(row.heads)}`);
+      fail('UI4', 'Log table shows TTFT, token counts + Tok/s',
+        `${cells} headers=${JSON.stringify(row.heads)}`);
     }
 
-    // UI5 — the detail modal spells out the token counts behind that rate.
+    // UI5 — the detail modal reads duration and TTFT off one line, with the
+    // token counts behind the rate. Opens the modal for UI6 and UI7.
     const line = readDetailStatsLine();
-    if (line !== null && line.includes('TTFT:') && line.includes('In: 25 tok') &&
-        line.includes('Out: 120 tok') && line.includes('tok/s')) {
-      pass('UI5', 'Detail shows TTFT, token counts and rate', JSON.stringify(line));
+    if (line !== null && /Duration: \d+ms/.test(line) && line.includes('TTFT:') &&
+        line.includes('In: 25 tok') && line.includes('Out: 120 tok') && line.includes('tok/s')) {
+      pass('UI5', 'Detail line carries duration, TTFT, token counts and rate', JSON.stringify(line));
     } else {
-      fail('UI5', 'Detail shows TTFT, token counts and rate', `got ${JSON.stringify(line)}`);
+      fail('UI5', 'Detail line carries duration, TTFT, token counts and rate',
+        `got ${JSON.stringify(line)}`);
+    }
+
+    // UI6 — nothing in the summary row sits under the close button.
+    const overlap = readCloseButtonOverlap();
+    if (!overlap.found) {
+      fail('UI6', 'Close button overlaps nothing', 'close button or summary row not rendered');
+    } else if (overlap.hits.length === 0) {
+      pass('UI6', 'Close button overlaps nothing', 'no summary-row child intersects its box');
+    } else {
+      fail('UI6', 'Close button overlaps nothing', `overlapped by ${JSON.stringify(overlap.hits)}`);
+    }
+
+    // UI7 — the captured event stream reads as beautified frames by default,
+    // and the toggle puts the recorded bytes back.
+    const beautified = readResponseBody();
+    if (!beautified.found || beautified.text === null) {
+      fail('UI7', 'SSE body beautified, toggle restores raw',
+        `response pane body not rendered: ${JSON.stringify(beautified)}`);
+    } else if (!beautified.text.includes('"type": "message_start"') ||
+        !beautified.text.includes('event: message_start')) {
+      fail('UI7', 'SSE body beautified, toggle restores raw',
+        `not beautified: ${JSON.stringify(beautified.text.slice(0, 160))} labels=${JSON.stringify(beautified.labels)}`);
+    } else {
+      toggleResponseFormat();
+      await sleep(300);
+      const rawBody = readResponseBody();
+      if (rawBody.text !== null && rawBody.text.includes('data: {"type":"message_start"')) {
+        pass('UI7', 'SSE body beautified, toggle restores raw',
+          `beautified=${JSON.stringify(beautified.text.slice(0, 80))} raw=${JSON.stringify(rawBody.text.slice(0, 80))}`);
+      } else {
+        fail('UI7', 'SSE body beautified, toggle restores raw',
+          `toggle did not restore raw: ${JSON.stringify(rawBody)}`);
+      }
     }
   } catch (e) {
     fail('UI', 'browser verification', String(e));

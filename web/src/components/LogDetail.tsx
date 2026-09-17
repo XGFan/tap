@@ -1,7 +1,7 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import JsonView from '@uiw/react-json-view'
 import { githubLightTheme } from '@uiw/react-json-view/githubLight'
-import { getLog, type ExchangeStats, type LogRecord } from '../api'
+import { getLog, type LogRecord } from '../api'
 
 interface Props {
   id: string
@@ -14,6 +14,44 @@ function parseJsonBody(value: string): { parsed: unknown; pretty: string; isJson
     return { parsed, pretty: JSON.stringify(parsed, null, 2), isJson: true }
   } catch {
     return { parsed: null, pretty: value, isJson: false }
+  }
+}
+
+/**
+ * An event stream, by its label where the label is decisive, and otherwise by
+ * the frame lines themselves — so a mislabelled or unlabelled capture is still
+ * read as one. Only the head is sniffed: a body that opens as something else is
+ * not an event stream, however far down a `data:` line appears.
+ */
+function looksLikeEventStream(text: string, contentType: string | undefined): boolean {
+  const ct = (contentType ?? '').toLowerCase()
+  if (ct.includes('text/event-stream')) return true
+  if (ct.includes('json')) return false
+  return /(^|\n)(data|event):/.test(text.slice(0, 4096))
+}
+
+/**
+ * Beautify an event stream: frames stay frames, and each `data:` payload that
+ * is JSON is pretty-printed in place. Everything else — event names, ids,
+ * comments, the `[DONE]` sentinel, a half-captured trailing frame — is passed
+ * through verbatim, so the beautified view never hides what was recorded.
+ */
+function beautifyEventStream(text: string): string {
+  return text
+    .split(/\n{2,}/)
+    .map((frame) => frame.trimEnd())
+    .filter((frame) => frame.length > 0)
+    .map((frame) => frame.split('\n').map(beautifyFrameLine).join('\n'))
+    .join('\n\n')
+}
+
+function beautifyFrameLine(line: string): string {
+  if (!line.startsWith('data:')) return line
+  const payload = line.slice(5).trim()
+  try {
+    return `data: ${JSON.stringify(JSON.parse(payload), null, 2)}`
+  } catch {
+    return line
   }
 }
 
@@ -75,7 +113,7 @@ function BodyBlock({
   originalBodyEncoding?: string
 }) {
   // Hooks must run before any early return.
-  const [view, setView] = useState<'tree' | 'raw'>('tree')
+  const [view, setView] = useState<'formatted' | 'raw'>('formatted')
   const [source, setSource] = useState<'rewritten' | 'original'>('rewritten')
 
   // originalBody is present ONLY when a Rewrite Rule changed this body.
@@ -83,6 +121,18 @@ function BodyBlock({
   const showingOriginal = wasRewritten && source === 'original'
   const activeBody = showingOriginal ? originalBody ?? null : body
   const activeEncoding = showingOriginal ? originalBodyEncoding ?? 'utf8' : encoding
+
+  // Beautified once per body, not once per render: a captured token stream runs
+  // to megabytes, and toggling the view must not reformat it again.
+  const eventStream = useMemo(
+    () =>
+      activeBody !== null &&
+      activeEncoding !== 'base64' &&
+      looksLikeEventStream(activeBody, contentType)
+        ? beautifyEventStream(activeBody)
+        : null,
+    [activeBody, activeEncoding, contentType],
+  )
 
   const sourceToggle = wasRewritten ? (
     <button
@@ -110,6 +160,7 @@ function BodyBlock({
   const trimmed = activeBody.trimStart()
   const looksJson =
     !isBase64 &&
+    eventStream === null &&
     ((contentType?.includes('json') ?? false) ||
       trimmed.startsWith('{') ||
       trimmed.startsWith('['))
@@ -121,8 +172,12 @@ function BodyBlock({
   // The tree view only makes sense for objects/arrays — top-level JSON
   // primitives (a bare string/number) fall back to the raw text view.
   const treeable = isJson && parsed !== null && typeof parsed === 'object'
-  const displayText = isJson ? pretty : activeBody
-  const showTree = treeable && view === 'tree'
+  const formatted = view === 'formatted'
+  const displayText =
+    eventStream !== null && formatted ? eventStream : isJson ? pretty : activeBody
+  const showTree = treeable && formatted
+  // The toggle is named for the view it switches to.
+  const toggleLabel = formatted ? 'Raw' : eventStream !== null ? 'Beautify' : 'Tree'
 
   return (
     <div className="body-section">
@@ -133,12 +188,12 @@ function BodyBlock({
         {isBase64 && <span className="badge badge-warn">base64</span>}
         {decodable === false && <span className="badge badge-warn">not decodable</span>}
         {sourceToggle}
-        {treeable && (
+        {(treeable || eventStream !== null) && (
           <button
             className="copy-btn"
-            onClick={() => setView((v) => (v === 'tree' ? 'raw' : 'tree'))}
+            onClick={() => setView((v) => (v === 'formatted' ? 'raw' : 'formatted'))}
           >
-            {view === 'tree' ? 'Raw' : 'Tree'}
+            {toggleLabel}
           </button>
         )}
         <CopyButton text={displayText} />
@@ -170,14 +225,20 @@ function BodyBlock({
 /**
  * One line of measurements, skipping whatever was not measurable: token counts
  * are only there when the upstream reported them, and a rate needs both a count
- * and a non-zero generation window.
+ * and a non-zero generation window. The duration belongs here rather than in the
+ * summary row — it is the whole that TTFT is a part of, and the two only read
+ * against each other.
  */
-function statsLine(stats: ExchangeStats): string | null {
+function measurementLine(record: LogRecord): string | null {
   const parts: string[] = []
-  if (stats.ttftMs !== null) parts.push(`TTFT: ${stats.ttftMs}ms`)
-  if (stats.inputTokens !== null) parts.push(`In: ${stats.inputTokens} tok`)
-  if (stats.outputTokens !== null) parts.push(`Out: ${stats.outputTokens} tok`)
-  if (stats.tokensPerSecond !== null) parts.push(`${stats.tokensPerSecond} tok/s`)
+  if (record.durationMs !== null) parts.push(`Duration: ${record.durationMs}ms`)
+  const stats = record.stats
+  if (stats) {
+    if (stats.ttftMs !== null) parts.push(`TTFT: ${stats.ttftMs}ms`)
+    if (stats.inputTokens !== null) parts.push(`In: ${stats.inputTokens} tok`)
+    if (stats.outputTokens !== null) parts.push(`Out: ${stats.outputTokens} tok`)
+    if (stats.tokensPerSecond !== null) parts.push(`${stats.tokensPerSecond} tok/s`)
+  }
   return parts.length > 0 ? parts.join(' · ') : null
 }
 
@@ -223,7 +284,7 @@ export default function LogDetail({ id, onClose }: Props) {
         {record && (
           <>
             {/* Summary row */}
-            <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', marginBottom: 4 }}>
+            <div className="detail-summary" style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', marginBottom: 4, paddingRight: 28 }}>
               <code style={{ fontWeight: 700 }}>{record.method}</code>
               <code style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 13 }}>
                 {record.path}{record.query ? `?${record.query}` : ''}
@@ -234,9 +295,6 @@ export default function LogDetail({ id, onClose }: Props) {
                 </span>
               )}
               {record.streaming && <span className="badge badge-stream">SSE</span>}
-              {record.durationMs !== null && (
-                <span style={{ fontSize: 12, color: '#555' }}>{record.durationMs}ms</span>
-              )}
               {record.error && (
                 <span className="badge badge-err" title={record.error}>ERR</span>
               )}
@@ -260,9 +318,9 @@ export default function LogDetail({ id, onClose }: Props) {
                 Error: {record.error}
               </div>
             )}
-            {record.stats && statsLine(record.stats) !== null && (
+            {measurementLine(record) !== null && (
               <div className="stats-line" style={{ fontSize: 12, color: '#888', marginBottom: 12 }}>
-                {statsLine(record.stats)}
+                {measurementLine(record)}
               </div>
             )}
             {(record.requestBytes !== null || record.responseBytes !== null) && (

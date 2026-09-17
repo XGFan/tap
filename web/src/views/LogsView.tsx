@@ -146,6 +146,8 @@ export default function LogsView() {
               <th>Status</th>
               <th>Duration</th>
               <th title="Time to first token — first response byte">TTFT</th>
+              <th title="Prompt tokens, as reported by the upstream">In</th>
+              <th title="Generated tokens, as reported by the upstream">Out</th>
               <th title="Output tokens per second, as reported by the upstream">Tok/s</th>
               <th>Stream</th>
               <th>Error</th>
@@ -154,7 +156,7 @@ export default function LogsView() {
           <tbody>
             {logs.length === 0 && !loading && (
               <tr>
-                <td colSpan={9} style={{ color: '#888', textAlign: 'center', padding: '20px 0' }}>
+                <td colSpan={11} style={{ color: '#888', textAlign: 'center', padding: '20px 0' }}>
                   No logs yet.
                 </td>
               </tr>
@@ -175,6 +177,8 @@ export default function LogsView() {
                   {log.durationMs !== null ? `${log.durationMs}ms` : '—'}
                 </td>
                 <td style={{ fontSize: 12 }}>{metric(log.stats?.ttftMs, 'ms')}</td>
+                <td style={{ fontSize: 12 }}>{metric(log.stats?.inputTokens, '')}</td>
+                <td style={{ fontSize: 12 }}>{metric(log.stats?.outputTokens, '')}</td>
                 <td style={{ fontSize: 12 }}>{metric(log.stats?.tokensPerSecond, '')}</td>
                 <td>
                   {log.streaming && <span className="badge badge-stream">SSE</span>}
