@@ -2,7 +2,7 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { EventEmitter } from 'node:events';
 import { getDataDir } from './config.js';
-import type { ExchangeRecord } from './types.js';
+import type { ExchangeRecord, ExchangeStats } from './types.js';
 
 /**
  * Single-writer JSONL logger (A1).
@@ -32,6 +32,8 @@ export interface LogSummary {
   durationMs: number;
   streaming: boolean;
   error: string | null;
+  /** TTFT + token throughput; absent when the exchange never reached upstream. */
+  stats?: ExchangeStats;
 }
 
 /** UTC-dated log file name for a given Date (deterministic, no local TZ). */
@@ -57,6 +59,7 @@ function summarize(record: ExchangeRecord): LogSummary {
     durationMs: record.durationMs,
     streaming: record.streaming,
     error: record.error,
+    ...(record.stats ? { stats: record.stats } : {}),
   };
 }
 

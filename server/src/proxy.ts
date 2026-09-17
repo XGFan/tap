@@ -7,6 +7,7 @@ import { decodeBody } from './decode.js';
 import { encodeBody as recompressBody } from './encode.js';
 import { applyRewrites, gateMatches } from './rewrite.js';
 import { redactForLog } from './redact.js';
+import { buildStats } from './stats.js';
 import { TeeTransform } from './tee.js';
 import {
   buildUpstreamUrl,
@@ -414,6 +415,15 @@ export async function proxyHandler(
       requestBytes: requestBuf.length,
       responseBytes: tee.totalBytes,
       error,
+      stats: buildStats({
+        ttftMs: tee.firstChunkAt !== null ? tee.firstChunkAt - startedAt : null,
+        durationMs,
+        streaming,
+        // Token counts are read from the decoded copy; a base64 (undecodable)
+        // body carries nothing we can scan.
+        bodyText: enc.encoding === 'utf8' ? enc.body : null,
+        contentType,
+      }),
     };
 
     await finalizeRecord(record);
@@ -440,9 +450,9 @@ export async function proxyHandler(
   async function bufferRewriteAndFinalize(
     requestBodyText: string | null,
   ): Promise<void> {
-    let captured: Buffer;
+    let collected: { buffer: Buffer; firstChunkAt: number | null };
     try {
-      captured = await collectStream(upstream.body, config.captureBodyLimitBytes);
+      collected = await collectStream(upstream.body, config.captureBodyLimitBytes);
     } catch (err) {
       // Upstream stream broke (or lied about Content-Length beyond the cap). We
       // send no body, so advertise Content-Length: 0 rather than the upstream's
@@ -477,6 +487,7 @@ export async function proxyHandler(
       return;
     }
 
+    const captured = collected.buffer;
     const respCE = upstreamHeaders['content-encoding'];
     const decoded = decodeBody(captured, respCE);
     const decodable = decoded.decodable;
@@ -486,8 +497,10 @@ export async function proxyHandler(
     let rewrittenText: string | null = null;
     let originalText: string | null = null;
 
+    let upstreamText: string | null = null;
     if (decodable && decoded.buffer && isValidUtf8(decoded.buffer)) {
       const origText = decoded.buffer.toString('utf8');
+      upstreamText = origText;
       const outcome = applyRewrites('response', config.rewriteRules, origText, {
         method,
         path: pathOnly,
@@ -537,6 +550,7 @@ export async function proxyHandler(
       response.originalBodyEncoding = oenc.encoding;
     }
 
+    const durationMs = Date.now() - startedAt;
     await finalizeRecord({
       id,
       timestamp,
@@ -547,10 +561,20 @@ export async function proxyHandler(
       request: requestRecord,
       response,
       streaming: false,
-      durationMs: Date.now() - startedAt,
+      durationMs,
       requestBytes: requestBuf.length,
       responseBytes: sendBuf.length,
       error: null,
+      stats: buildStats({
+        ttftMs:
+          collected.firstChunkAt !== null ? collected.firstChunkAt - startedAt : null,
+        durationMs,
+        streaming: false,
+        // The UPSTREAM's own text: a Rewrite Rule may have changed the body the
+        // client got, but the token counts describe what the model produced.
+        bodyText: upstreamText,
+        contentType,
+      }),
     });
   }
 
@@ -637,21 +661,25 @@ function writeResponseHead(
 }
 
 /**
- * Collect a readable body fully into one Buffer. Throws if the total exceeds
- * `cap` — a safety net against an upstream that under-reports Content-Length;
- * the caller treats that as a stream error and fails closed for that exchange.
+ * Collect a readable body fully into one Buffer, reporting when its first chunk
+ * arrived (TTFT — this path has no tee to observe it). Throws if the total
+ * exceeds `cap` — a safety net against an upstream that under-reports
+ * Content-Length; the caller treats that as a stream error and fails closed for
+ * that exchange.
  */
 async function collectStream(
   stream: AsyncIterable<Buffer | string | Uint8Array>,
   cap: number,
-): Promise<Buffer> {
+): Promise<{ buffer: Buffer; firstChunkAt: number | null }> {
   const chunks: Buffer[] = [];
   let total = 0;
+  let firstChunkAt: number | null = null;
   for await (const chunk of stream) {
+    if (firstChunkAt === null) firstChunkAt = Date.now();
     const b = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
     total += b.length;
     if (total > cap) throw new Error('response exceeded buffer cap');
     chunks.push(b);
   }
-  return Buffer.concat(chunks, total);
+  return { buffer: Buffer.concat(chunks, total), firstChunkAt };
 }

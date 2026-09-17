@@ -6,6 +6,8 @@
  * Endpoints:
  *   GET/POST /json           — fixed Content-Length JSON response
  *   POST     /sse            — text/event-stream, 3 events 100ms apart + [DONE]
+ *   POST     /tokens-sse     — Anthropic-shaped SSE carrying usage (TTFT/token speed)
+ *   POST     /tokens-json    — OpenAI-shaped bounded JSON carrying usage
  *   POST     /gemini-stream  — incremental JSON array (no CL), 3 chunks
  *   POST     /slow           — 1 chunk immediately, then 5s pause, then end
  *   GET      /gzip           — gzip-compressed JSON body
@@ -78,6 +80,54 @@ const server = http.createServer(async (req, res) => {
     }
     res.write('data: [DONE]\n\n');
     res.end();
+    return;
+  }
+
+  // ── /tokens-sse ── Anthropic-shaped SSE carrying usage ─────────────────────
+  // The 120ms head start before the first event is what makes TTFT distinguishable
+  // from total duration; the output count arrives only in the final message_delta,
+  // exactly as the real API splits it.
+  if (url === '/tokens-sse') {
+    await readBody(req);
+    res.writeHead(200, {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache',
+      'Transfer-Encoding': 'chunked',
+    });
+    await sleep(120);
+    res.write(
+      'event: message_start\ndata: {"type":"message_start","message":{"id":"msg_mock","usage":{"input_tokens":25,"output_tokens":1}}}\n\n',
+    );
+    for (let i = 0; i < 3; i++) {
+      await sleep(60);
+      res.write(
+        `event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"tok${i} "}}\n\n`,
+      );
+    }
+    res.write(
+      'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":120}}\n\n',
+    );
+    res.end();
+    return;
+  }
+
+  // ── /tokens-json ── OpenAI-shaped bounded JSON carrying usage ──────────────
+  if (url === '/tokens-json') {
+    await readBody(req);
+    const body = JSON.stringify({
+      id: 'chatcmpl-usage',
+      object: 'chat.completion',
+      choices: [
+        { index: 0, message: { role: 'assistant', content: 'hi' }, finish_reason: 'stop' },
+      ],
+      usage: { prompt_tokens: 11, completion_tokens: 7, total_tokens: 18 },
+    });
+    await sleep(80); // generation time: the whole body arrives after it
+    res.writeHead(200, {
+      'Content-Type': 'application/json',
+      'Content-Length': Buffer.byteLength(body),
+    });
+    res.end(body);
     return;
   }
 

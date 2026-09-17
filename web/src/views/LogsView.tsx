@@ -4,6 +4,11 @@ import LogDetail from '../components/LogDetail'
 
 const PAGE_SIZE = 50
 
+/** A token count / rate, or an em dash when the upstream reported none. */
+function metric(value: number | null | undefined, unit: string): string {
+  return value === null || value === undefined ? '—' : `${value}${unit}`
+}
+
 function statusBadge(status: number | null, error: string | null): JSX.Element {
   if (error && !status) {
     return <span className="badge badge-err">ERR</span>
@@ -140,6 +145,8 @@ export default function LogsView() {
               <th>Path</th>
               <th>Status</th>
               <th>Duration</th>
+              <th title="Time to first token — first response byte">TTFT</th>
+              <th title="Output tokens per second, as reported by the upstream">Tok/s</th>
               <th>Stream</th>
               <th>Error</th>
             </tr>
@@ -147,7 +154,7 @@ export default function LogsView() {
           <tbody>
             {logs.length === 0 && !loading && (
               <tr>
-                <td colSpan={7} style={{ color: '#888', textAlign: 'center', padding: '20px 0' }}>
+                <td colSpan={9} style={{ color: '#888', textAlign: 'center', padding: '20px 0' }}>
                   No logs yet.
                 </td>
               </tr>
@@ -167,6 +174,8 @@ export default function LogsView() {
                 <td style={{ fontSize: 12 }}>
                   {log.durationMs !== null ? `${log.durationMs}ms` : '—'}
                 </td>
+                <td style={{ fontSize: 12 }}>{metric(log.stats?.ttftMs, 'ms')}</td>
+                <td style={{ fontSize: 12 }}>{metric(log.stats?.tokensPerSecond, '')}</td>
                 <td>
                   {log.streaming && <span className="badge badge-stream">SSE</span>}
                 </td>

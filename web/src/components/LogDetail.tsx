@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import JsonView from '@uiw/react-json-view'
 import { githubLightTheme } from '@uiw/react-json-view/githubLight'
-import { getLog, type LogRecord } from '../api'
+import { getLog, type ExchangeStats, type LogRecord } from '../api'
 
 interface Props {
   id: string
@@ -167,6 +167,20 @@ function BodyBlock({
   )
 }
 
+/**
+ * One line of measurements, skipping whatever was not measurable: token counts
+ * are only there when the upstream reported them, and a rate needs both a count
+ * and a non-zero generation window.
+ */
+function statsLine(stats: ExchangeStats): string | null {
+  const parts: string[] = []
+  if (stats.ttftMs !== null) parts.push(`TTFT: ${stats.ttftMs}ms`)
+  if (stats.inputTokens !== null) parts.push(`In: ${stats.inputTokens} tok`)
+  if (stats.outputTokens !== null) parts.push(`Out: ${stats.outputTokens} tok`)
+  if (stats.tokensPerSecond !== null) parts.push(`${stats.tokensPerSecond} tok/s`)
+  return parts.length > 0 ? parts.join(' · ') : null
+}
+
 function statusBadgeClass(status: number): string {
   if (status < 300) return 'badge-2xx'
   if (status < 400) return 'badge-3xx'
@@ -244,6 +258,11 @@ export default function LogDetail({ id, onClose }: Props) {
             {record.error && (
               <div className="error-msg" style={{ marginBottom: 12 }}>
                 Error: {record.error}
+              </div>
+            )}
+            {record.stats && statsLine(record.stats) !== null && (
+              <div className="stats-line" style={{ fontSize: 12, color: '#888', marginBottom: 12 }}>
+                {statsLine(record.stats)}
               </div>
             )}
             {(record.requestBytes !== null || record.responseBytes !== null) && (

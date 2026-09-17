@@ -11,7 +11,7 @@ import { Transform, type TransformCallback } from 'node:stream';
  *   `truncated = true`; forwarding continues regardless.
  * - Tracks `chunkCount` and `totalBytes` (bytes forwarded, original encoding),
  *   used by the proxy to compute the post-hoc `streaming` label and
- *   `responseBytes`.
+ *   `responseBytes`, and `firstChunkAt` for TTFT.
  */
 export class TeeTransform extends Transform {
   private readonly capBytes: number;
@@ -21,6 +21,10 @@ export class TeeTransform extends Transform {
   public truncated = false;
   public chunkCount = 0;
   public totalBytes = 0;
+  /** Epoch ms at which the FIRST body chunk arrived; null until one does.
+   * The proxy turns it into TTFT. Taken here because this is the first place
+   * the response body is observed, before any downstream write. */
+  public firstChunkAt: number | null = null;
 
   constructor(capBytes: number) {
     super();
@@ -35,6 +39,7 @@ export class TeeTransform extends Transform {
     // Normalize to Buffer (upstream body emits Buffers, but be defensive).
     const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
 
+    if (this.firstChunkAt === null) this.firstChunkAt = Date.now();
     this.chunkCount += 1;
     this.totalBytes += buf.length;
 

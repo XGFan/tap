@@ -22,7 +22,7 @@ No unit test framework. Verification is E2E only:
 
 ```sh
 pnpm build && node test/verify/run.mjs   # builds, starts mocks+gateway, runs checks
-pnpm build && node test/verify/ui.mjs    # browser checks (banner gate); SKIPS without playwright-cli
+pnpm build && node test/verify/ui.mjs    # browser checks (banner gate, stats readout); SKIPS without playwright-cli
 node test/mock-upstream.mjs [port]        # standalone mock upstream (default :9090)
 ```
 
@@ -62,6 +62,12 @@ on the built bundle's text cannot tell a gated element from an unconditional one
 - Example hook is enabled by default; disable with `GATEWAY_EXAMPLE_HOOKS=0`.
 - Hooks see unredacted values, and anything a hook writes into `ctx.meta` is logged verbatim (not covered by redaction).
 
+**Stats** (`server/src/stats.ts`):
+- `stats.ttftMs` is the first response BODY byte, timed from the same instant as `durationMs` (gateway entry) — the TTFT the client experienced. Read off `TeeTransform.firstChunkAt` on the stream-through path, off `collectStream` on the buffered one.
+- Token counts are ONLY what the upstream reported (`usage` / `usageMetadata`; OpenAI, Anthropic, Gemini; bounded + streaming). Nothing is estimated, so a response without a usage report logs nulls.
+- `tokensPerSecond` divides by the observed generation window: `durationMs - ttftMs` when streaming, `durationMs` when bounded. See `docs/adr/0004`.
+- Parsing happens at finalize time, after forwarding — never on the client's latency path — and is fail-open: an unparseable or truncated body yields nulls.
+
 **JSONL logger** (`server/src/logger.ts`):
 - Single-writer chain with per-link error isolation. UTC-dated files in `logs/`.
 - `logEvents` EventEmitter drives the SSE live tail.
@@ -94,8 +100,9 @@ Vite proxies `/__gateway/api` and `/__gateway/app` to `:8080` in dev mode. SSE b
 | `server/src/logger.ts` | JSONL append chain + SSE event bus |
 | `server/src/upstream.ts` | URL building, header sanitization, timeout options |
 | `server/src/redact.ts` | Log-time credential masking, applied to a copy at the `logExchange` funnel |
-| `test/verify/run.mjs` | E2E acceptance criteria (C1–C7, A1–A4, AR1, B1, RD1–RD7, RW1–RW8, SHOW1–SHOW2) |
-| `test/mock-upstream.mjs` | Mock endpoints: /json, /sse, /gemini-stream, /slow, /gzip, /badgzip, /hang, /reset, /creds |
+| `server/src/stats.ts` | TTFT + token-speed measurement and upstream usage parsing |
+| `test/verify/run.mjs` | E2E acceptance criteria (C1–C7, A1–A4, AR1, B1, RD1–RD7, RW1–RW8, SHOW1–SHOW2, TS1–TS4) |
+| `test/mock-upstream.mjs` | Mock endpoints: /json, /sse, /tokens-sse, /tokens-json, /gemini-stream, /slow, /gzip, /badgzip, /hang, /reset, /creds |
 
 ## Gotchas
 

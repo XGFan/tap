@@ -1,7 +1,7 @@
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { LOG_DIR, logFileNameForDate } from './logger.js';
-import type { ExchangeRecord } from './types.js';
+import type { ExchangeRecord, ExchangeStats } from './types.js';
 
 /** Compact summary returned by listExchanges (mirrors the SSE LogSummary). */
 export interface ExchangeSummary {
@@ -13,6 +13,8 @@ export interface ExchangeSummary {
   durationMs: number;
   streaming: boolean;
   error: string | null;
+  /** TTFT + token throughput; absent when the exchange never reached upstream. */
+  stats?: ExchangeStats;
 }
 
 export interface ListOptions {
@@ -33,6 +35,7 @@ function toSummary(r: ExchangeRecord): ExchangeSummary {
     durationMs: r.durationMs,
     streaming: r.streaming,
     error: r.error,
+    ...(r.stats ? { stats: r.stats } : {}),
   };
 }
 

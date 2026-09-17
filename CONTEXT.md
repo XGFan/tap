@@ -53,6 +53,22 @@ incremental body sent without `Content-Length`. Always passed through to the
 client untouched; not eligible for rewrite.
 _Avoid_: chunked response, SSE (SSE is only one kind of Streaming Response)
 
+**TTFT**:
+Time To First Token — milliseconds from the gateway receiving a request to the
+first byte of the upstream response body, so it includes the gateway's own
+overhead and is what the client experienced. For a Streaming Response that byte
+carries the first token; for a Bounded Response the whole body arrives at once,
+making TTFT the full generation time.
+_Avoid_: latency, first-byte time, response time
+
+**Token Speed**:
+Output tokens per second over the observed generation window — `durationMs -
+ttftMs` for a Streaming Response, `durationMs` for a Bounded one (see
+[[0004-ttft-and-token-speed-from-reported-usage]]). Derived from counts the
+upstream itself reported; never estimated, so it is absent whenever the upstream
+reported no usage.
+_Avoid_: throughput, tok/s (as a name), generation rate
+
 **Redaction**:
 Masking credential-bearing values in the gateway's **record** of an exchange —
 configured header names, query params and the query part of `upstreamUrl`. Applied

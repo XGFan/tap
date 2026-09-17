@@ -1332,6 +1332,107 @@ async function checkSHOW_showcaseRules() {
   await httpPut(cfgUrl, { baseUrl: 'http://localhost:9090', rewriteRules: [] });
 }
 
+// ── TS: TTFT + token speed ──────────────────────────────────────────────────
+
+/** Recompute the rate the record should carry, from the record's own numbers. */
+function expectedRate(stats, durationMs, streaming) {
+  const windowMs = streaming && stats.ttftMs !== null ? durationMs - stats.ttftMs : durationMs;
+  if (stats.outputTokens === null || windowMs <= 0) return null;
+  return Math.round((stats.outputTokens / (windowMs / 1000)) * 10) / 10;
+}
+
+async function checkTS_tokenStats() {
+  console.log('\n[TS] TTFT + token speed');
+
+  // TS1 — Streaming: TTFT is the first token, not the whole exchange; Anthropic
+  // splits usage across message_start (input) and message_delta (final output).
+  try {
+    await httpPost('http://localhost:8080/tokens-sse', '{"stream":true}', {
+      'Content-Type': 'application/json',
+    });
+    await sleep(300);
+    const records = await readTodayLog();
+    const rec = [...records].reverse().find((r) => r.path === '/tokens-sse');
+    const st = rec?.stats;
+    const ttftOk = st?.ttftMs >= 100 && st.ttftMs <= rec.durationMs - 100;
+    const tokensOk = st?.inputTokens === 25 && st?.outputTokens === 120;
+    const rate = expectedRate(st ?? {}, rec?.durationMs, true);
+    const rateOk = st?.tokensPerSecond !== null && Math.abs(st?.tokensPerSecond - rate) < 0.2;
+    if (ttftOk && tokensOk && rateOk) {
+      pass('TS1', 'Streaming: TTFT distinct from duration, usage merged, rate over decode window',
+        `stats=${JSON.stringify(st)} durationMs=${rec.durationMs}`);
+    } else {
+      fail('TS1', 'Streaming: TTFT + token speed',
+        `ttftOk=${ttftOk} tokensOk=${tokensOk} rateOk=${rateOk} expectedRate=${rate} stats=${JSON.stringify(st)} durationMs=${rec?.durationMs}`);
+    }
+  } catch (e) {
+    fail('TS1', 'Streaming: TTFT + token speed', String(e));
+  }
+
+  // TS2 — Bounded JSON: OpenAI-shaped usage, rate over the whole duration
+  // (the body arrives at once AFTER generation, so there is no decode window).
+  try {
+    await httpPost('http://localhost:8080/tokens-json', '{"q":1}', {
+      'Content-Type': 'application/json',
+    });
+    await sleep(300);
+    const records = await readTodayLog();
+    const rec = [...records].reverse().find((r) => r.path === '/tokens-json');
+    const st = rec?.stats;
+    const tokensOk = st?.inputTokens === 11 && st?.outputTokens === 7;
+    const ttftOk = st?.ttftMs >= 70;
+    const rate = expectedRate(st ?? {}, rec?.durationMs, false);
+    const rateOk = st?.tokensPerSecond !== null && Math.abs(st?.tokensPerSecond - rate) < 0.2;
+    if (tokensOk && ttftOk && rateOk) {
+      pass('TS2', 'Bounded JSON: usage parsed, rate over full duration',
+        `stats=${JSON.stringify(st)} durationMs=${rec.durationMs}`);
+    } else {
+      fail('TS2', 'Bounded JSON: usage parsed',
+        `tokensOk=${tokensOk} ttftOk=${ttftOk} rateOk=${rateOk} expectedRate=${rate} stats=${JSON.stringify(st)} durationMs=${rec?.durationMs}`);
+    }
+  } catch (e) {
+    fail('TS2', 'Bounded JSON: usage parsed', String(e));
+  }
+
+  // TS3 — An upstream that reports no usage: TTFT is still measured, token
+  // fields stay null. Counts are never estimated.
+  try {
+    await httpPost('http://localhost:8080/sse', '', {});
+    await sleep(300);
+    const records = await readTodayLog();
+    const rec = [...records].reverse().find((r) => r.path === '/sse');
+    const st = rec?.stats;
+    const ttftOk = typeof st?.ttftMs === 'number' && st.ttftMs >= 0;
+    const nullsOk =
+      st?.inputTokens === null && st?.outputTokens === null && st?.tokensPerSecond === null;
+    if (ttftOk && nullsOk) {
+      pass('TS3', 'No usage reported -> TTFT measured, token fields null',
+        `stats=${JSON.stringify(st)}`);
+    } else {
+      fail('TS3', 'No usage reported -> token fields null',
+        `ttftOk=${ttftOk} nullsOk=${nullsOk} stats=${JSON.stringify(st)}`);
+    }
+  } catch (e) {
+    fail('TS3', 'No usage reported -> token fields null', String(e));
+  }
+
+  // TS4 — The list API carries stats, so the log table can show them without
+  // fetching every record.
+  try {
+    const res = await httpGet('http://localhost:8080/__gateway/api/logs?limit=50');
+    const items = JSON.parse(res.body).items;
+    const item = items.find((i) => i.path === '/tokens-sse');
+    const ok = item?.stats?.outputTokens === 120 && typeof item.stats.ttftMs === 'number';
+    if (ok) {
+      pass('TS4', 'Log summary API carries stats', `summary.stats=${JSON.stringify(item.stats)}`);
+    } else {
+      fail('TS4', 'Log summary API carries stats', `item=${JSON.stringify(item)}`);
+    }
+  } catch (e) {
+    fail('TS4', 'Log summary API carries stats', String(e));
+  }
+}
+
 // ── report writer ──────────────────────────────────────────────────────────
 
 async function writeReport() {
@@ -1401,6 +1502,7 @@ async function main() {
   await checkRD_redaction();
   await checkRW_rewriteRules();
   await checkSHOW_showcaseRules();
+  await checkTS_tokenStats();
 
   console.log('\n[teardown] Stopping servers...');
   await teardown();

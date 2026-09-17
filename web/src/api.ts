@@ -17,6 +17,18 @@ export interface GatewayConfig {
   redact: RedactConfig
 }
 
+/** TTFT + token throughput for one exchange (mirrors server ExchangeStats). */
+export interface ExchangeStats {
+  /** ms from exchange start to the first response body byte. */
+  ttftMs: number | null
+  /** Prompt tokens as reported by the upstream (null when it reported none). */
+  inputTokens: number | null
+  /** Generated tokens as reported by the upstream. */
+  outputTokens: number | null
+  /** Output tokens over the observed generation window. */
+  tokensPerSecond: number | null
+}
+
 export interface LogSummary {
   id: string
   timestamp: string
@@ -26,6 +38,8 @@ export interface LogSummary {
   durationMs: number | null
   streaming: boolean
   error: string | null
+  /** Absent when the exchange never reached the upstream. */
+  stats?: ExchangeStats
 }
 
 /** One Rewrite Rule that fired during an exchange (mirrors server RewriteAnnotation). */
@@ -67,6 +81,8 @@ export interface LogRecord {
   requestBytes: number | null
   responseBytes: number | null
   error: string | null
+  /** Absent when the exchange never reached the upstream. */
+  stats?: ExchangeStats
   /** Hook/rule annotations. meta.rewrites lists the Rewrite Rules that fired. */
   meta?: { rewrites?: RewriteAnnotation[] } & Record<string, unknown>
 }

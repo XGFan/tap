@@ -277,6 +277,30 @@ export interface RewriteAnnotation {
 }
 
 /**
+ * Latency and throughput measurements for one exchange (see stats.ts). Token
+ * counts are what the upstream itself reported — never estimated — so they are
+ * null for a response that carries no usage report.
+ */
+export interface ExchangeStats {
+  /**
+   * Time To First Token: ms from exchange start to the first response body
+   * byte, measured from the same instant as `durationMs`. For a Streaming
+   * Response that byte carries the first token; for a Bounded Response the
+   * whole body arrives at once, so it is the full generation time.
+   */
+  ttftMs: number | null;
+  /** Prompt tokens reported by the upstream. */
+  inputTokens: number | null;
+  /** Generated tokens reported by the upstream (reasoning/thinking included). */
+  outputTokens: number | null;
+  /**
+   * `outputTokens` over the observed generation window: `durationMs - ttftMs`
+   * for a Streaming Response, `durationMs` for a Bounded one. One decimal.
+   */
+  tokensPerSecond: number | null;
+}
+
+/**
  * One fully-recorded request/response exchange. This is the JSONL line schema.
  * Logger impl lives in task #3, but the TYPE is the cross-task contract.
  */
@@ -298,6 +322,11 @@ export interface ExchangeRecord {
   requestBytes: number;
   responseBytes: number; // bytes forwarded to client (original encoding)
   error: string | null; // e.g. upstream_unreachable, upstream_timeout, client_aborted
+  /**
+   * TTFT + token throughput. Present whenever the upstream produced a response
+   * body; omitted on the early-error paths that never reached the upstream.
+   */
+  stats?: ExchangeStats;
   /**
    * Optional annotations contributed by hooks (e.g. an audit hook setting
    * { audited: true }). Populated from ExchangeContext.meta when non-empty;

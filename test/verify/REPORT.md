@@ -1,6 +1,6 @@
 # Gateway E2E Verification Report
 
-Generated: 2026-09-17T07:43:41.842Z
+Generated: 2026-09-17T10:27:13.805Z
 
 ## Summary
 
@@ -40,8 +40,12 @@ Generated: 2026-09-17T07:43:41.842Z
 | RW8 Non-decodable response -> fail-open (original bytes, gateway alive) | ✅ PASS |
 | SHOW1 hello -> echo tool_use injected into response | ✅ PASS |
 | SHOW2 time -> {{now}} live timestamp in forwarded request | ✅ PASS |
+| TS1 Streaming: TTFT distinct from duration, usage merged, rate over decode window | ✅ PASS |
+| TS2 Bounded JSON: usage parsed, rate over full duration | ✅ PASS |
+| TS3 No usage reported -> TTFT measured, token fields null | ✅ PASS |
+| TS4 Log summary API carries stats | ✅ PASS |
 
-**PASS: 34 / FAIL: 0 / NOTE: 0 / Total: 34**
+**PASS: 38 / FAIL: 0 / NOTE: 0 / Total: 38**
 
 ---
 
@@ -78,14 +82,14 @@ authorization=kept host=localhost:9090 client-Connection-not-echoed=true (undici
 ### C4 — JSONL integrity
 **✅ PASS**
 
-10 new lines written, all valid ExchangeRecord shape. Sample id=01M2Q53WR5G1NBGRH9FMW07AAQ
+10 new lines written, all valid ExchangeRecord shape. Sample id=01M2QEF4SFF7BC23031V4ERHSG
 
 ---
 
 ### C5 — Runtime config no-restart
 **✅ PASS**
 
-PID=4415 unchanged, request hit :9091, config.json baseUrl="http://localhost:9091"
+PID=15345 unchanged, request hit :9091, config.json baseUrl="http://localhost:9091"
 
 ---
 
@@ -190,7 +194,7 @@ upstream saw key "/json?key=AIzaSyD-abcdefghijklmnopqrstuvwxyz1234567&model=gpt-
 ### RD3 — Response headers masked, client copy untouched
 **✅ PASS**
 
-client set-cookie carries real value (writeResponseHead unaffected); log response.headers={"content-type":"application/json","content-length":"11","set-cookie":"session=sess-a***2345; Path=***; HttpOnly","authorization":"Bearer resp-a***2345","date":"Thu, 17 Sep 2026 07:43:35 GMT","connection":"keep-alive","keep-alive":"timeout=5"}
+client set-cookie carries real value (writeResponseHead unaffected); log response.headers={"content-type":"application/json","content-length":"11","set-cookie":"session=sess-a***2345; Path=***; HttpOnly","authorization":"Bearer resp-a***2345","date":"Thu, 17 Sep 2026 10:27:03 GMT","connection":"keep-alive","keep-alive":"timeout=5"}
 
 ---
 
@@ -281,5 +285,33 @@ control tool_calls=[]; hello tool_calls=[{"type":"function","function":{"name":"
 ### SHOW2 — time -> {{now}} live timestamp in forwarded request
 **✅ PASS**
 
-control upstream echo={"q":"hello world"}; rewritten upstream echo={"q":"what 2026-09-17 15:43:41 is it"}
+control upstream echo={"q":"hello world"}; rewritten upstream echo={"q":"what 2026-09-17 18:27:10 is it"}
+
+---
+
+### TS1 — Streaming: TTFT distinct from duration, usage merged, rate over decode window
+**✅ PASS**
+
+stats={"ttftMs":122,"inputTokens":25,"outputTokens":120,"tokensPerSecond":652.2} durationMs=306
+
+---
+
+### TS2 — Bounded JSON: usage parsed, rate over full duration
+**✅ PASS**
+
+stats={"ttftMs":81,"inputTokens":11,"outputTokens":7,"tokensPerSecond":86.4} durationMs=81
+
+---
+
+### TS3 — No usage reported -> TTFT measured, token fields null
+**✅ PASS**
+
+stats={"ttftMs":103,"inputTokens":null,"outputTokens":null,"tokensPerSecond":null}
+
+---
+
+### TS4 — Log summary API carries stats
+**✅ PASS**
+
+summary.stats={"ttftMs":122,"inputTokens":25,"outputTokens":120,"tokensPerSecond":652.2}
 
