@@ -7,7 +7,13 @@ import type {
 
 /**
  * The hook seam — the supported extension point for cross-cutting behavior
- * (auditing, redaction, request/response rewriting) WITHOUT editing proxy.ts.
+ * (auditing, request/response rewriting) WITHOUT editing proxy.ts.
+ *
+ * Redaction is NOT a hook. A request hook mutating ctx.requestHeaders changes
+ * what the upstream receives (proxy.ts sanitizeRequestHeaders reads that same
+ * object), so redacting there breaks auth. Log redaction happens in redact.ts,
+ * applied to a copy at log time — see docs/adr/0003. Hooks see unredacted
+ * values; anything a hook writes into ctx.meta is logged verbatim.
  *
  * The proxy core calls runRequestHooks(ctx) before forwarding upstream and
  * runResponseHooks(ctx, record) in the pipeline callback right before the
@@ -62,16 +68,3 @@ export async function runResponseHooks(
     await hook(ctx, record);
   }
 }
-
-/**
- * Example request hook demonstrating the seam. Header redaction is OFF by
- * default — this hook intentionally does nothing. It exists so the redaction
- * point is discoverable: flip the body to redact sensitive headers (e.g.
- * authorization, x-api-key) on ctx.requestHeaders before forwarding, or build a
- * configurable version. Registered below so it participates in the chain.
- */
-export const redactHeaders: RequestHook = (_ctx: ExchangeContext): void => {
-  // No-op by default. Redaction is opt-in; see this hook to enable it.
-};
-
-registerRequestHook(redactHeaders);

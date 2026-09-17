@@ -6,6 +6,7 @@ import { getConfig } from './config.js';
 import { decodeBody } from './decode.js';
 import { encodeBody as recompressBody } from './encode.js';
 import { applyRewrites, gateMatches } from './rewrite.js';
+import { redactForLog } from './redact.js';
 import { TeeTransform } from './tee.js';
 import {
   buildUpstreamUrl,
@@ -432,7 +433,7 @@ export async function proxyHandler(
     }
     // Persist hook-contributed annotations (after response hooks ran).
     if (Object.keys(ctx.meta).length > 0) record.meta = { ...ctx.meta };
-    await logExchange(record);
+    await logExchange(redactForLog(record, config.redact));
   }
 
   // ── terminal disposition for the buffered response-rewrite path ─────────────

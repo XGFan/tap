@@ -13,6 +13,7 @@
  *   GET      /hang           — headers + 1 chunk, then silent forever
  *   POST     /reset          — destroys socket mid-body
  *   POST     /v1/chat/completions — tool-use-shaped bounded JSON (rewrite showcase)
+ *   GET      /creds           — response carrying credential-bearing headers (redaction tests)
  *   GET      /__seen         — returns last recorded request info as JSON
  */
 
@@ -151,6 +152,19 @@ const server = http.createServer(async (req, res) => {
     await readBody(req);
     // Destroy socket immediately, simulating upstream abort.
     req.socket.destroy();
+    return;
+  }
+
+  // ── /creds ── response carrying credential-bearing headers (redaction tests) ─
+  if (url === '/creds') {
+    const body = JSON.stringify({ ok: true });
+    res.writeHead(200, {
+      'Content-Type': 'application/json',
+      'Content-Length': Buffer.byteLength(body),
+      'Set-Cookie': 'session=sess-abcdefghijklmnopqrstuvwxyz012345; Path=/; HttpOnly',
+      'Authorization': 'Bearer resp-abcdefghijklmnopqrstuvwxyz012345',
+    });
+    res.end(body);
     return;
   }
 

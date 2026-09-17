@@ -12,8 +12,7 @@ import { registerRequestHook, registerResponseHook } from '../hooks.js';
  *     which the proxy persists into the logged ExchangeRecord.meta.
  *
  * Enabled by default so the e2e suite can observe it end-to-end. To disable,
- * set GATEWAY_EXAMPLE_HOOKS=0 (or "false") in the environment. The default
- * redactHeaders hook in hooks.ts remains a no-op; this is the opt-out demo.
+ * set GATEWAY_EXAMPLE_HOOKS=0 (or "false") in the environment.
  */
 
 const flag = process.env.GATEWAY_EXAMPLE_HOOKS;

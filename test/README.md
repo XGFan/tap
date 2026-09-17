@@ -23,6 +23,7 @@ PORT=9091 node test/mock-upstream.mjs
 | GET | `/badgzip` | `Content-Encoding: gzip` header but truncated garbage bytes | A4 bad-gzip: `bodyDecodable:false` in JSONL log |
 | GET | `/hang` | Sends headers + 1 chunk, then holds connection open forever | AR1: body-timeout reaps hung upstream while SSE is NOT reaped |
 | POST | `/reset` | Accepts request then calls `req.socket.destroy()` mid-body | A2/M3: client-abort + `/reset`; no crash + one JSONL line |
+| GET | `/creds` | 200 JSON `{"ok":true}` with `Set-Cookie` and `Authorization` response headers carrying credential-shaped values | Redaction tests: response-header masking (RD3) |
 | GET | `/__seen` | Returns JSON map of all recorded requests (method, path, headers) | Header pass-through assertions: `Authorization` kept, `Host` rewritten, `Connection` stripped |
 
 ### Notes

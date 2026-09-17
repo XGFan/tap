@@ -22,8 +22,13 @@ No unit test framework. Verification is E2E only:
 
 ```sh
 pnpm build && node test/verify/run.mjs   # builds, starts mocks+gateway, runs checks
+pnpm build && node test/verify/ui.mjs    # browser checks (banner gate); SKIPS without playwright-cli
 node test/mock-upstream.mjs [port]        # standalone mock upstream (default :9090)
 ```
+
+`run.mjs` is headless and dependency-free. UI behaviour that only exists in the
+DOM lives in `ui.mjs`, which drives a real browser via `playwright-cli` — asserting
+on the built bundle's text cannot tell a gated element from an unconditional one.
 
 ## URL Layout
 
@@ -41,18 +46,21 @@ node test/mock-upstream.mjs [port]        # standalone mock upstream (default :9
 **Config** (`config.json` at root, gitignored):
 - Validated with zod. `baseUrl` must be scheme+host only (no path).
 - Runtime updates via PUT — no restart needed. Config is immutable; updates atomically swap a frozen object reference.
+- PUT replaces object and array nodes (`rewriteRules`, `redact`) wholesale — send the complete node. A partial PUT of `redact` resets the name lists you omit back to schema defaults, it does not merge.
 
 **Proxy core** (`server/src/proxy.ts`):
 - Uses `reply.hijack()` — Fastify does not touch the response after that.
 - Catch-all content parser buffers ALL bodies as Buffer. JSON parsing is restored only inside `/__gateway/api` scope.
 - `TeeTransform` tees a bounded copy for logging without blocking forwarding.
 - Streaming label is POST-HOC only (never a routing decision): `text/event-stream` OR (no `Content-Length` AND `chunkCount > 1`).
+- Log redaction (`redact.ts`) is applied to a **copy** of the record at `finalizeRecord`, the single `logExchange` caller. Forwarding and `ctx` are never redacted — a redacted `ctx.requestHeaders` would reach the upstream and 401. See `docs/adr/0003`.
 
 **Hook system** (`server/src/hooks.ts`):
 - Request hooks run BEFORE forwarding (can mutate `ctx.requestHeaders`).
 - Response hooks run AFTER response, BEFORE logging.
 - Hooks self-register via side-effect import at startup (see `server/src/hooks/example-audit.ts`).
 - Example hook is enabled by default; disable with `GATEWAY_EXAMPLE_HOOKS=0`.
+- Hooks see unredacted values, and anything a hook writes into `ctx.meta` is logged verbatim (not covered by redaction).
 
 **JSONL logger** (`server/src/logger.ts`):
 - Single-writer chain with per-link error isolation. UTC-dated files in `logs/`.
@@ -85,8 +93,9 @@ Vite proxies `/__gateway/api` and `/__gateway/app` to `:8080` in dev mode. SSE b
 | `server/src/hooks.ts` | Hook seam — registerRequestHook / registerResponseHook |
 | `server/src/logger.ts` | JSONL append chain + SSE event bus |
 | `server/src/upstream.ts` | URL building, header sanitization, timeout options |
-| `test/verify/run.mjs` | E2E acceptance criteria (C1–C7, A1–A4, AR1) |
-| `test/mock-upstream.mjs` | Mock endpoints: /json, /sse, /gemini-stream, /slow, /gzip, /badgzip, /hang, /reset |
+| `server/src/redact.ts` | Log-time credential masking, applied to a copy at the `logExchange` funnel |
+| `test/verify/run.mjs` | E2E acceptance criteria (C1–C7, A1–A4, AR1, B1, RD1–RD7, RW1–RW8, SHOW1–SHOW2) |
+| `test/mock-upstream.mjs` | Mock endpoints: /json, /sse, /gemini-stream, /slow, /gzip, /badgzip, /hang, /reset, /creds |
 
 ## Gotchas
 
@@ -96,3 +105,4 @@ Vite proxies `/__gateway/api` and `/__gateway/app` to `:8080` in dev mode. SSE b
 4. **No `as any` or `@ts-ignore`** — strict TypeScript is enforced. Fix type errors properly.
 5. **Hook imports are side-effects** — importing a hook module registers it. Don't import hook files in tests unless you want them active.
 6. **Proxy body handling** — Fastify's default parsers are removed globally. The catch-all parser returns a Buffer. Don't add new content-type parsers without understanding the encapsulation scope.
+7. **Redaction covers headers, query string and `upstreamUrl` — not bodies.** A credential in a request or response body is still logged in plaintext.

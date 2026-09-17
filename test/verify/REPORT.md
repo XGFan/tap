@@ -1,6 +1,6 @@
 # Gateway E2E Verification Report
 
-Generated: 2026-06-30T09:38:11.524Z
+Generated: 2026-09-17T07:43:41.842Z
 
 ## Summary
 
@@ -21,6 +21,15 @@ Generated: 2026-06-30T09:38:11.524Z
 | AR1 Timeout reaping: /hang reaped, /sse NOT reaped | ✅ PASS |
 | C3 Cold start 503 | ✅ PASS |
 | B1 Non-UTF8 body→base64, UTF-8 body→utf8 | ✅ PASS |
+| RD5 Schema defaults: redact.enabled=true, requestHeaders includes authorization | ✅ PASS |
+| RD1 Credential header: upstream verbatim, log masked | ✅ PASS |
+| RD1b Basic credentials masked whole (no decodable tail) | ✅ PASS |
+| RD1c Cookie headers masked per pair (reveal not positional) | ✅ PASS |
+| RD2 Query credential: forwarded verbatim, masked in query and upstreamUrl | ✅ PASS |
+| RD3 Response headers masked, client copy untouched | ✅ PASS |
+| RD4 Redaction OFF is verbatim | ✅ PASS |
+| RD5b Config round-trip: PUT response, GET, config.json agree | ✅ PASS |
+| RD6 Names come from config, not hard-coded | ✅ PASS |
 | RW1 Request body rewrite reaches upstream + logged | ✅ PASS |
 | RW2 Bounded response rewrite reaches client + Content-Length | ✅ PASS |
 | RW3 gzip response re-encoded to original Content-Encoding | ✅ PASS |
@@ -32,7 +41,7 @@ Generated: 2026-06-30T09:38:11.524Z
 | SHOW1 hello -> echo tool_use injected into response | ✅ PASS |
 | SHOW2 time -> {{now}} live timestamp in forwarded request | ✅ PASS |
 
-**PASS: 25 / FAIL: 0 / NOTE: 0 / Total: 25**
+**PASS: 34 / FAIL: 0 / NOTE: 0 / Total: 34**
 
 ---
 
@@ -55,7 +64,7 @@ firstByteMs=103 events=true jsonl.streaming=true bodyExcerpt="data: {\"i\":0}\n\
 ### C2b — Gemini-stream low-latency + capture
 **✅ PASS**
 
-firstByteMs=6 bodyOk=true jsonl.streaming=true
+firstByteMs=2 bodyOk=true jsonl.streaming=true
 
 ---
 
@@ -69,14 +78,14 @@ authorization=kept host=localhost:9090 client-Connection-not-echoed=true (undici
 ### C4 — JSONL integrity
 **✅ PASS**
 
-10 new lines written, all valid ExchangeRecord shape. Sample id=01KWBY90ATCCGFD16HB8NNBJBB
+10 new lines written, all valid ExchangeRecord shape. Sample id=01M2Q53WR5G1NBGRH9FMW07AAQ
 
 ---
 
 ### C5 — Runtime config no-restart
 **✅ PASS**
 
-PID=14171 unchanged, request hit :9091, config.json baseUrl="http://localhost:9091"
+PID=4415 unchanged, request hit :9091, config.json baseUrl="http://localhost:9091"
 
 ---
 
@@ -125,7 +134,7 @@ status=200 clientBytes=6 bodyDecodable=false bodyEncoding=base64
 ### AR1 — Timeout reaping: /hang reaped, /sse NOT reaped
 **✅ PASS**
 
-/hang: status=0 elapsed=2502ms error="upstream_timeout" reaped=true; /sse: completed=true; gateway alive=true
+/hang: status=0 elapsed=2501ms error="upstream_timeout" reaped=true; /sse: completed=true; gateway alive=true
 
 ---
 
@@ -140,6 +149,69 @@ status=503 body={"error":"upstream_not_configured"} jsonl.error="upstream_not_co
 **✅ PASS**
 
 binary body: bodyEncoding="base64"; utf8 body: bodyEncoding="utf8"
+
+---
+
+### RD5 — Schema defaults: redact.enabled=true, requestHeaders includes authorization
+**✅ PASS**
+
+GET /config (before any redact PUT) redact={"enabled":true,"requestHeaders":["authorization","proxy-authorization","x-api-key","api-key","x-goog-api-key","x-auth-token","cookie"],"responseHeaders":["set-cookie","authorization"],"queryParams":["key","api_key","apikey","access_token","token"]}
+
+---
+
+### RD1 — Credential header: upstream verbatim, log masked
+**✅ PASS**
+
+upstream authorization="Bearer sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123456789WXYZ" x-api-key="sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123456789WXYZ"; log authorization="Bearer sk-ant***WXYZ" x-api-key="sk-ant***WXYZ"; whole-record leak check clean=true
+
+---
+
+### RD1b — Basic credentials masked whole (no decodable tail)
+**✅ PASS**
+
+log authorization="Basic ***"; residual tail decodes to ""; leak check clean=true
+
+---
+
+### RD1c — Cookie headers masked per pair (reveal not positional)
+**✅ PASS**
+
+log cookie="k=***; other=***"; no leading fragment of the value, names still readable
+
+---
+
+### RD2 — Query credential: forwarded verbatim, masked in query and upstreamUrl
+**✅ PASS**
+
+upstream saw key "/json?key=AIzaSyD-abcdefghijklmnopqrstuvwxyz1234567&model=gpt-4"; rec.query="key=AIzaSy***4567&model=gpt-4"; rec.upstreamUrl="http://localhost:9090/json?key=AIzaSy***4567&model=gpt-4" (non-configured "model=gpt-4" survives unmasked — proof redaction is targeted)
+
+---
+
+### RD3 — Response headers masked, client copy untouched
+**✅ PASS**
+
+client set-cookie carries real value (writeResponseHead unaffected); log response.headers={"content-type":"application/json","content-length":"11","set-cookie":"session=sess-a***2345; Path=***; HttpOnly","authorization":"Bearer resp-a***2345","date":"Thu, 17 Sep 2026 07:43:35 GMT","connection":"keep-alive","keep-alive":"timeout=5"}
+
+---
+
+### RD4 — Redaction OFF is verbatim
+**✅ PASS**
+
+authorization="Bearer sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123456789WXYZ"; query="key=AIzaSyD-abcdefghijklmnopqrstuvwxyz1234567&model=gpt-4"; upstreamUrl="http://localhost:9090/json?key=AIzaSyD-abcdefghijklmnopqrstuvwxyz1234567&model=gpt-4"
+
+---
+
+### RD5b — Config round-trip: PUT response, GET, config.json agree
+**✅ PASS**
+
+redact={"enabled":true,"requestHeaders":["x-custom-key"],"responseHeaders":[],"queryParams":["key"]}
+
+---
+
+### RD6 — Names come from config, not hard-coded
+**✅ PASS**
+
+x-custom-key masked="sk-ant***WXYZ"; authorization verbatim="Bearer sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123456789WXYZ"
 
 ---
 
@@ -209,5 +281,5 @@ control tool_calls=[]; hello tool_calls=[{"type":"function","function":{"name":"
 ### SHOW2 — time -> {{now}} live timestamp in forwarded request
 **✅ PASS**
 
-control upstream echo={"q":"hello world"}; rewritten upstream echo={"q":"what 2026-06-30 17:38:11 is it"}
+control upstream echo={"q":"hello world"}; rewritten upstream echo={"q":"what 2026-09-17 15:43:41 is it"}
 

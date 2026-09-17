@@ -1,12 +1,20 @@
 // Typed fetch wrappers for the LLM Gateway API.
 // All endpoints are same-origin in prod under /__gateway/api.
 
+export interface RedactConfig {
+  enabled: boolean
+  requestHeaders: string[]
+  responseHeaders: string[]
+  queryParams: string[]
+}
+
 export interface GatewayConfig {
   baseUrl: string
   timeoutMs: number
   bodyTimeoutMs: number
   captureBodyLimitBytes: number
   captureRequestBodyLimitBytes: number
+  redact: RedactConfig
 }
 
 export interface LogSummary {

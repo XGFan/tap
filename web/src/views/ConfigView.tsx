@@ -1,5 +1,11 @@
 import { useEffect, useState } from 'react'
-import { getConfig, putConfig, type GatewayConfig } from '../api'
+import { putConfig, type GatewayConfig } from '../api'
+
+interface Props {
+  config: GatewayConfig | null
+  loadError: string | null
+  onSaved: (config: GatewayConfig) => void
+}
 
 function validateBaseUrl(value: string): string | null {
   if (!value.trim()) return 'baseUrl is required'
@@ -19,23 +25,16 @@ function validateBaseUrl(value: string): string | null {
   return null
 }
 
-export default function ConfigView() {
-  const [config, setConfig] = useState<GatewayConfig | null>(null)
-  const [form, setForm] = useState<GatewayConfig | null>(null)
-  const [loadError, setLoadError] = useState<string | null>(null)
+export default function ConfigView({ config, loadError, onSaved }: Props) {
+  const [form, setForm] = useState<GatewayConfig | null>(config)
   const [saving, setSaving] = useState(false)
   const [saveError, setSaveError] = useState<string | null>(null)
   const [saveSuccess, setSaveSuccess] = useState(false)
   const [baseUrlError, setBaseUrlError] = useState<string | null>(null)
 
   useEffect(() => {
-    getConfig()
-      .then((c) => {
-        setConfig(c)
-        setForm(c)
-      })
-      .catch((e: unknown) => setLoadError(String(e)))
-  }, [])
+    setForm(config)
+  }, [config])
 
   function handleChange(field: keyof GatewayConfig, value: string) {
     if (!form) return
@@ -62,7 +61,7 @@ export default function ConfigView() {
     setSaveSuccess(false)
     try {
       const updated = await putConfig(form)
-      setConfig(updated)
+      onSaved(updated)
       setForm(updated)
       setSaveSuccess(true)
     } catch (e: unknown) {
@@ -151,6 +150,29 @@ export default function ConfigView() {
             value={form.captureRequestBodyLimitBytes}
             onChange={(e) => handleChange('captureRequestBodyLimitBytes', e.target.value)}
           />
+        </div>
+
+        <div className="form-row">
+          <label htmlFor="redactEnabled">
+            <input
+              id="redactEnabled"
+              type="checkbox"
+              checked={form.redact.enabled}
+              onChange={(e) => {
+                setSaveSuccess(false)
+                setSaveError(null)
+                setForm({ ...form, redact: { ...form.redact, enabled: e.target.checked } })
+              }}
+            />
+            {' '}Redact credentials in logs
+          </label>
+          <span className="hint">
+            Masks these in the JSONL record only — the upstream always receives the original
+            values. Request headers: {form.redact.requestHeaders.join(', ')}. Response headers:{' '}
+            {form.redact.responseHeaders.join(', ')}. Query params:{' '}
+            {form.redact.queryParams.join(', ')}. Request and response <strong>bodies are not
+            redacted</strong>.
+          </span>
         </div>
 
         <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>

@@ -827,6 +827,297 @@ async function checkB1_base64Body() {
   }
 }
 
+async function checkRD_redaction() {
+  console.log('\n[RD] Config-driven log redaction');
+  const cfgUrl = 'http://localhost:8080/__gateway/api/config';
+  // try/finally: every RD block has its own catch, but a hard throw between the
+  // RD4 "enabled: false" PUT and the restore would otherwise persist redaction
+  // OFF into the developer's config.json.
+  try {
+  const SECRET = 'sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123456789WXYZ';
+  const QSECRET = 'AIzaSyD-abcdefghijklmnopqrstuvwxyz1234567';
+  const RESP_COOKIE = 'sess-abcdefghijklmnopqrstuvwxyz012345';
+  const RESP_BEARER = 'resp-abcdefghijklmnopqrstuvwxyz012345';
+
+  // RD5 (schema defaults) — MUST be the very first thing this function does.
+  // §8 originally placed this assertion fifth, after RD1/RD4 have already PUT
+  // explicit redact config — by then config.json carries an explicit block and
+  // the "materialized by the schema, never written by a test" claim is false.
+  try {
+    const res = await httpGet(cfgUrl);
+    const cfg = JSON.parse(res.body);
+    const enabledByDefault = cfg?.redact?.enabled === true;
+    const hasAuthDefault =
+      Array.isArray(cfg?.redact?.requestHeaders) && cfg.redact.requestHeaders.includes('authorization');
+    if (enabledByDefault && hasAuthDefault) {
+      pass('RD5', 'Schema defaults: redact.enabled=true, requestHeaders includes authorization',
+        `GET /config (before any redact PUT) redact=${JSON.stringify(cfg.redact)}`);
+    } else {
+      fail('RD5', 'Schema defaults: redact.enabled=true, requestHeaders includes authorization',
+        `enabledByDefault=${enabledByDefault} hasAuthDefault=${hasAuthDefault} redact=${JSON.stringify(cfg?.redact)}`);
+    }
+  } catch (e) { fail('RD5', 'Schema defaults', String(e)); }
+
+  // RD1: credential header — upstream verbatim, log masked (AC1).
+  try {
+    await httpPut(cfgUrl, { baseUrl: 'http://localhost:9090', redact: { enabled: true } });
+    await sleep(100);
+    const before = (await readTodayLog()).length;
+    await httpGet('http://localhost:8080/json', {
+      Authorization: `Bearer ${SECRET}`,
+      'X-Api-Key': SECRET,
+    });
+    await sleep(300);
+
+    const seen = await httpGet('http://localhost:9090/__seen');
+    const seenData = JSON.parse(seen.body);
+    const jsonEntry = seenData['/json'];
+    const upstreamAuthVerbatim = jsonEntry?.headers?.authorization === `Bearer ${SECRET}`;
+    const upstreamApiKeyVerbatim = jsonEntry?.headers?.['x-api-key'] === SECRET;
+
+    const rec = (await readTodayLog()).slice(before).find((r) => r.path === '/json');
+    const auth = rec?.request?.headers?.authorization;
+    const apiKey = rec?.request?.headers?.['x-api-key'];
+    const authMasked =
+      typeof auth === 'string' && auth.startsWith('Bearer sk-ant') && auth.includes('***') && auth.endsWith('WXYZ');
+    const apiKeyMasked = typeof apiKey === 'string' && apiKey !== SECRET && apiKey.includes('***');
+    // The single most important check in the whole suite: no full secret anywhere in the record.
+    const noLeak = JSON.stringify(rec).includes(SECRET) === false;
+
+    if (upstreamAuthVerbatim && upstreamApiKeyVerbatim && authMasked && apiKeyMasked && noLeak) {
+      pass('RD1', 'Credential header: upstream verbatim, log masked',
+        `upstream authorization="${jsonEntry?.headers?.authorization}" x-api-key="${jsonEntry?.headers?.['x-api-key']}"; ` +
+        `log authorization="${auth}" x-api-key="${apiKey}"; whole-record leak check clean=${noLeak}`);
+    } else {
+      fail('RD1', 'Credential header: upstream verbatim, log masked',
+        `upstreamAuthVerbatim=${upstreamAuthVerbatim} upstreamApiKeyVerbatim=${upstreamApiKeyVerbatim} ` +
+        `authMasked=${authMasked}(${auth}) apiKeyMasked=${apiKeyMasked}(${apiKey}) noLeak=${noLeak}`);
+    }
+  } catch (e) { fail('RD1', 'Credential header masking', String(e)); }
+
+  // RD1b: Basic credentials are masked WHOLE. base64 packs 3 bytes per 4 chars,
+  // so keeping the last 4 chars of a Basic credential decodes cleanly to the last
+  // 3 bytes of the password ("...S2Nk" -> "Kcd"). The lead/tail reveal is for
+  // opaque tokens; here it hands over plaintext, so the secret is dropped entirely.
+  try {
+    const BASIC_PASS = 'Tr0ub4dor&3xKcd';
+    const BASIC_CRED = Buffer.from(`admin:${BASIC_PASS}`).toString('base64');
+    const before = (await readTodayLog()).length;
+    await httpGet('http://localhost:8080/json', { Authorization: `Basic ${BASIC_CRED}` });
+    await sleep(300);
+
+    const rec = (await readTodayLog()).slice(before).find((r) => r.path === '/json');
+    const auth = rec?.request?.headers?.authorization;
+    const schemeKept = auth === 'Basic ***';
+    // Decode whatever survives after the mask and prove it reveals no password bytes.
+    const tail = typeof auth === 'string' ? auth.slice(auth.lastIndexOf('***') + 3) : 'x';
+    const decoded = tail === '' ? '' : Buffer.from(tail, 'base64').toString('utf8');
+    const noPlaintext = decoded === '' || !BASIC_PASS.endsWith(decoded);
+    const noLeak = JSON.stringify(rec).includes(BASIC_CRED) === false;
+
+    if (schemeKept && noPlaintext && noLeak) {
+      pass('RD1b', 'Basic credentials masked whole (no decodable tail)',
+        `log authorization="${auth}"; residual tail decodes to ${JSON.stringify(decoded)}; leak check clean=${noLeak}`);
+    } else {
+      fail('RD1b', 'Basic credentials masked whole (no decodable tail)',
+        `auth="${auth}" schemeKept=${schemeKept} decodedTail=${JSON.stringify(decoded)} noLeak=${noLeak}`);
+    }
+  } catch (e) { fail('RD1b', 'Basic credential masking', String(e)); }
+
+  // RD1c: cookie headers are masked per name=value pair. The lead/tail reveal is
+  // positional, so across a "a=1; b=2" list it would start inside the first name
+  // and end inside the last segment — "k=SECRETVALUE…; other=1" gave up
+  // "k=SECR***er=1", four leading characters of a real value.
+  try {
+    const COOKIE_SECRET = 'SECRETVALUE12345678';
+    const before = (await readTodayLog()).length;
+    await httpGet('http://localhost:8080/json', { Cookie: `k=${COOKIE_SECRET}; other=1` });
+    await sleep(300);
+
+    const rec = (await readTodayLog()).slice(before).find((r) => r.path === '/json');
+    const cookie = rec?.request?.headers?.cookie;
+    const noLeadLeak = typeof cookie === 'string' && !cookie.includes('SECR');
+    const namesKept = typeof cookie === 'string' && cookie.startsWith('k=') && cookie.includes('other=');
+    const noLeak = JSON.stringify(rec).includes(COOKIE_SECRET) === false;
+
+    if (noLeadLeak && namesKept && noLeak) {
+      pass('RD1c', 'Cookie headers masked per pair (reveal not positional)',
+        `log cookie="${cookie}"; no leading fragment of the value, names still readable`);
+    } else {
+      fail('RD1c', 'Cookie headers masked per pair',
+        `cookie="${cookie}" noLeadLeak=${noLeadLeak} namesKept=${namesKept} noLeak=${noLeak}`);
+    }
+  } catch (e) { fail('RD1c', 'Cookie header masking', String(e)); }
+
+  // RD2: query credential — forwarded verbatim, masked in query AND upstreamUrl (AC2).
+  try {
+    // Set our own config rather than inheriting RD1's, so a failure here is never
+    // a failure of the preceding check (same guard RD6 uses).
+    await httpPut(cfgUrl, { baseUrl: 'http://localhost:9090', redact: { enabled: true } });
+    await sleep(100);
+    const before = (await readTodayLog()).length;
+    await httpGet(`http://localhost:8080/json?key=${QSECRET}&model=gpt-4`);
+    await sleep(300);
+
+    // Gotcha: /__seen is keyed by req.url INCLUDING the query string, so look
+    // up the full path+query, not "/json".
+    const seen = await httpGet('http://localhost:9090/__seen');
+    const seenData = JSON.parse(seen.body);
+    const expectedKey = `/json?key=${QSECRET}&model=gpt-4`;
+    const upstreamSawQuery = Object.keys(seenData).includes(expectedKey);
+
+    const rec = (await readTodayLog()).slice(before).find((r) => r.path === '/json');
+    const query = rec?.query ?? '';
+    const upstreamUrl = rec?.upstreamUrl ?? '';
+    const queryMasked =
+      query.startsWith('key=AIzaS') && query.includes('***') && query.includes('model=gpt-4') && !query.includes(QSECRET);
+    const urlMasked =
+      upstreamUrl.startsWith('http://localhost:9090/json?key=') && upstreamUrl.includes('***') && !upstreamUrl.includes(QSECRET);
+    const noLeak = JSON.stringify(rec).includes(QSECRET) === false;
+
+    if (upstreamSawQuery && queryMasked && urlMasked && noLeak) {
+      pass('RD2', 'Query credential: forwarded verbatim, masked in query and upstreamUrl',
+        `upstream saw key "${expectedKey}"; rec.query="${query}"; rec.upstreamUrl="${upstreamUrl}" ` +
+        `(non-configured "model=gpt-4" survives unmasked — proof redaction is targeted)`);
+    } else {
+      fail('RD2', 'Query credential masking',
+        `upstreamSawQuery=${upstreamSawQuery} queryMasked=${queryMasked}(${query}) urlMasked=${urlMasked}(${upstreamUrl}) noLeak=${noLeak}`);
+    }
+  } catch (e) { fail('RD2', 'Query credential masking', String(e)); }
+
+  // RD3: response headers masked in the log; client's own copy is untouched (AC3).
+  try {
+    // Self-sufficient, like RD2/RD6 — do not inherit a preceding check's config.
+    await httpPut(cfgUrl, { baseUrl: 'http://localhost:9090', redact: { enabled: true } });
+    await sleep(100);
+    const before = (await readTodayLog()).length;
+    const res = await httpGet('http://localhost:8080/creds');
+    await sleep(300);
+
+    const setCookie = res.headers['set-cookie'];
+    const cookieVal = Array.isArray(setCookie) ? setCookie.join(';') : (setCookie ?? '');
+    const clientCookieVerbatim = cookieVal.includes(RESP_COOKIE);
+
+    const rec = (await readTodayLog()).slice(before).find((r) => r.path === '/creds');
+    const respHeadersStr = JSON.stringify(rec?.response?.headers ?? {});
+    const noCookieLeak = !respHeadersStr.includes(RESP_COOKIE);
+    const noBearerLeak = !respHeadersStr.includes(RESP_BEARER);
+    const hasMask = respHeadersStr.includes('***');
+
+    if (clientCookieVerbatim && noCookieLeak && noBearerLeak && hasMask) {
+      pass('RD3', 'Response headers masked, client copy untouched',
+        `client set-cookie carries real value (writeResponseHead unaffected); log response.headers=${respHeadersStr}`);
+    } else {
+      fail('RD3', 'Response headers masking',
+        `clientCookieVerbatim=${clientCookieVerbatim} noCookieLeak=${noCookieLeak} noBearerLeak=${noBearerLeak} hasMask=${hasMask} headers=${respHeadersStr}`);
+    }
+  } catch (e) { fail('RD3', 'Response headers masking', String(e)); }
+
+  // RD4: redaction OFF is verbatim (AC4).
+  try {
+    await httpPut(cfgUrl, { baseUrl: 'http://localhost:9090', redact: { enabled: false } });
+    await sleep(100);
+    const before = (await readTodayLog()).length;
+    await httpGet('http://localhost:8080/json', {
+      Authorization: `Bearer ${SECRET}`,
+      'X-Api-Key': SECRET,
+    });
+    await httpGet(`http://localhost:8080/json?key=${QSECRET}&model=gpt-4`);
+    await sleep(300);
+
+    const newRecords = (await readTodayLog()).slice(before).filter((r) => r.path === '/json');
+    const authRec = newRecords.find((r) => r.request?.headers?.authorization !== undefined);
+    const queryRec = newRecords.find((r) => (r.query ?? '').includes('key='));
+    const authVerbatim = authRec?.request?.headers?.authorization === `Bearer ${SECRET}`;
+    const queryVerbatim = (queryRec?.query ?? '').includes(QSECRET);
+    const urlVerbatim = (queryRec?.upstreamUrl ?? '').includes(QSECRET);
+
+    if (authVerbatim && queryVerbatim && urlVerbatim) {
+      pass('RD4', 'Redaction OFF is verbatim',
+        `authorization="${authRec?.request?.headers?.authorization}"; query="${queryRec?.query}"; upstreamUrl="${queryRec?.upstreamUrl}"`);
+    } else {
+      fail('RD4', 'Redaction OFF is verbatim',
+        `authVerbatim=${authVerbatim} queryVerbatim=${queryVerbatim} urlVerbatim=${urlVerbatim}`);
+    }
+  } catch (e) { fail('RD4', 'Redaction OFF verbatim', String(e)); }
+
+  // RD5b: config round-trip (AC6) — PUT response body, a fresh GET, and the
+  // on-disk config.json all agree.
+  try {
+    const putBody = {
+      baseUrl: 'http://localhost:9090',
+      redact: { enabled: true, requestHeaders: ['x-custom-key'], responseHeaders: [], queryParams: ['key'] },
+    };
+    const putRes = await httpPut(cfgUrl, putBody);
+    const putJson = JSON.parse(putRes.body);
+    await sleep(100);
+    const getRes = await httpGet(cfgUrl);
+    const getJson = JSON.parse(getRes.body);
+    const onDisk = JSON.parse(await fs.readFile(CONFIG_PATH, 'utf8'));
+
+    // Assert every field, including responseHeaders: [] — an EXPLICITLY EMPTY list
+    // must survive rather than be re-filled from the schema default. That is the
+    // property a future change to the .default([...]) handling would break.
+    const agrees = (o) =>
+      o?.redact?.enabled === true &&
+      JSON.stringify(o?.redact?.requestHeaders) === JSON.stringify(['x-custom-key']) &&
+      JSON.stringify(o?.redact?.responseHeaders) === JSON.stringify([]) &&
+      JSON.stringify(o?.redact?.queryParams) === JSON.stringify(['key']);
+    const putOk = agrees(putJson);
+    const getOk = agrees(getJson);
+    const diskOk = agrees(onDisk);
+
+    if (putOk && getOk && diskOk) {
+      pass('RD5b', 'Config round-trip: PUT response, GET, config.json agree',
+        `redact=${JSON.stringify(getJson.redact)}`);
+    } else {
+      fail('RD5b', 'Config round-trip',
+        `putOk=${putOk}(${JSON.stringify(putJson?.redact)}) getOk=${getOk}(${JSON.stringify(getJson?.redact)}) diskOk=${diskOk}(${JSON.stringify(onDisk?.redact)})`);
+    }
+  } catch (e) { fail('RD5b', 'Config round-trip', String(e)); }
+
+  // RD6: names come from config, not hard-coded in proxy.ts. Self-sufficient —
+  // PUTs its own config rather than relying on RD5b's config still being in
+  // force (a failed RD5b PUT would otherwise leave defaults in place, masking
+  // "authorization" and making this check fail for the wrong reason).
+  try {
+    await httpPut(cfgUrl, {
+      baseUrl: 'http://localhost:9090',
+      redact: { enabled: true, requestHeaders: ['x-custom-key'] },
+    });
+    await sleep(100);
+    const before = (await readTodayLog()).length;
+    await httpGet('http://localhost:8080/json', {
+      'X-Custom-Key': SECRET,
+      Authorization: `Bearer ${SECRET}`,
+    });
+    await sleep(300);
+
+    const rec = (await readTodayLog()).slice(before).find((r) => r.path === '/json');
+    const customKey = rec?.request?.headers?.['x-custom-key'];
+    const auth = rec?.request?.headers?.authorization;
+    const customMasked = typeof customKey === 'string' && customKey !== SECRET && customKey.includes('***');
+    const authVerbatim = auth === `Bearer ${SECRET}`;
+
+    if (customMasked && authVerbatim) {
+      pass('RD6', 'Names come from config, not hard-coded',
+        `x-custom-key masked="${customKey}"; authorization verbatim="${auth}"`);
+    } else {
+      fail('RD6', 'Names come from config, not hard-coded',
+        `customMasked=${customMasked}(${customKey}) authVerbatim=${authVerbatim}(${auth})`);
+    }
+  } catch (e) { fail('RD6', 'Names come from config, not hard-coded', String(e)); }
+
+  } finally {
+    // Restore the SCHEMA DEFAULT (enabled: true), not "off". Later checks (RW*,
+    // SHOW*) assert only on bodies, which are never redacted, so they pass either
+    // way — but leaving the suite's own config behind would silently disable
+    // redaction on the developer's local gateway after a run that just proved it works.
+    await httpPut(cfgUrl, { baseUrl: 'http://localhost:9090', redact: { enabled: true } });
+    await sleep(100);
+  }
+}
+
 async function checkRW_rewriteRules() {
   console.log('\n[RW] Rewrite Rules');
   const cfgUrl = 'http://localhost:8080/__gateway/api/config';
@@ -1107,6 +1398,7 @@ async function main() {
   await checkAR1_timeoutReaping();
   await checkC3_coldStart();
   await checkB1_base64Body();
+  await checkRD_redaction();
   await checkRW_rewriteRules();
   await checkSHOW_showcaseRules();
 

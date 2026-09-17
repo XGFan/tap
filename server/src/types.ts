@@ -117,6 +117,35 @@ export const rewriteRuleSchema = z
 export type RewriteRule = z.infer<typeof rewriteRuleSchema>;
 
 /**
+ * Which credential-bearing fields get masked in the JSONL record. Names are
+ * matched case-insensitively; the defaults cover the Anthropic / OpenAI (incl.
+ * Azure) / Gemini families this gateway proxies, plus generic proxy+session
+ * credentials. Redaction applies to the LOG ONLY — never to what is forwarded.
+ */
+export const redactConfigSchema = z.object({
+  enabled: z.boolean().default(true),
+  requestHeaders: z
+    .array(z.string().transform((s) => s.toLowerCase()))
+    .default([
+      'authorization', // OpenAI, Anthropic, most vendors
+      'proxy-authorization', // hop-by-hop: dropped when forwarding, KEPT in the log
+      'x-api-key', // Anthropic
+      'api-key', // Azure OpenAI
+      'x-goog-api-key', // Gemini
+      'x-auth-token',
+      'cookie',
+    ]),
+  responseHeaders: z
+    .array(z.string().transform((s) => s.toLowerCase()))
+    .default(['set-cookie', 'authorization']),
+  queryParams: z
+    .array(z.string().transform((s) => s.toLowerCase()))
+    .default(['key', 'api_key', 'apikey', 'access_token', 'token']),
+});
+
+export type RedactConfig = z.infer<typeof redactConfigSchema>;
+
+/**
  * Upstream configuration.
  *
  * baseUrl must be scheme + host ONLY (no path). The proxy appends the incoming
@@ -155,6 +184,8 @@ export const upstreamConfigSchema = z.object({
   captureRequestBodyLimitBytes: z.number().int().positive().default(5_000_000),
   // Declarative match -> rewrite rules, applied in array order (see RewriteRule).
   rewriteRules: z.array(rewriteRuleSchema).default([]),
+  // Log-only credential masking (see RedactConfig). Never affects forwarding.
+  redact: redactConfigSchema.default({}),
 });
 
 export type UpstreamConfig = z.infer<typeof upstreamConfigSchema>;
@@ -191,6 +222,8 @@ export const upstreamConfigUpdateSchema = z
     captureRequestBodyLimitBytes: z.number().int().positive().optional(),
     // Whole-array replace on update (the UI/API submits the full rule list).
     rewriteRules: z.array(rewriteRuleSchema).optional(),
+    // Whole-node replace on update, like rewriteRules (the UI submits the full node).
+    redact: redactConfigSchema.optional(),
   })
   .strict();
 

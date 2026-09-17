@@ -52,3 +52,12 @@ Any response without an up-front size — SSE (`text/event-stream`) or an
 incremental body sent without `Content-Length`. Always passed through to the
 client untouched; not eligible for rewrite.
 _Avoid_: chunked response, SSE (SSE is only one kind of Streaming Response)
+
+**Redaction**:
+Masking credential-bearing values in the gateway's **record** of an exchange —
+configured header names, query params and the query part of `upstreamUrl`. Applied
+to a copy at log time: the forwarded request, the client-facing response and the
+Hook-visible `ExchangeContext` always carry the original values. Bodies are out of
+scope. Distinct from the header *sanitization* in `upstream.ts`, which is forwarding
+hygiene (dropping hop-by-hop headers), not log hygiene.
+_Avoid_: scrubbing, sanitization, filtering
