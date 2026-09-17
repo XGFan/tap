@@ -22,7 +22,7 @@ No unit test framework. Verification is E2E only:
 
 ```sh
 pnpm build && node test/verify/run.mjs   # builds, starts mocks+gateway, runs checks
-pnpm build && node test/verify/ui.mjs    # browser checks (banner gate, measurement readout, modal layout, beautified SSE body); SKIPS without playwright-cli
+pnpm build && node test/verify/ui.mjs    # browser checks (banner gate, measurement readout, modal layout, SSE frames as JSON trees); SKIPS without playwright-cli
 node test/mock-upstream.mjs [port]        # standalone mock upstream (default :9090)
 ```
 

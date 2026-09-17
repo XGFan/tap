@@ -55,6 +55,100 @@ function beautifyFrameLine(line: string): string {
   }
 }
 
+/**
+ * A frame as the beautified view renders it: its lines in recorded order, with
+ * the `data:` payload replaced by the parsed value when it is JSON — that part
+ * gets the same tree the request body gets, the rest stays text.
+ */
+type FramePart =
+  | { kind: 'text'; text: string }
+  | { kind: 'json'; value: object }
+
+function parseEventStream(text: string): FramePart[][] {
+  return text
+    .split(/\n{2,}/)
+    .map((frame) => frame.trimEnd())
+    .filter((frame) => frame.length > 0)
+    .map(parseFrame)
+}
+
+/**
+ * Multi-line `data:` payloads concatenate, per the event-stream grammar, so a
+ * frame carries at most one payload. It is rendered where its first `data:`
+ * line was recorded; every other line keeps its place and its bytes.
+ */
+function parseFrame(frame: string): FramePart[] {
+  const before: string[] = []
+  const after: string[] = []
+  const data: string[] = []
+  for (const line of frame.split('\n')) {
+    if (line.startsWith('data:')) data.push(line.slice(5).trim())
+    else if (data.length === 0) before.push(line)
+    else after.push(line)
+  }
+  const parts: FramePart[] = before.map((text) => ({ kind: 'text', text }))
+  if (data.length > 0) {
+    const payload = data.join('\n')
+    const value = parseJsonObject(payload)
+    parts.push(value !== null ? { kind: 'json', value } : { kind: 'text', text: `data: ${payload}` })
+  }
+  return parts.concat(after.map((text) => ({ kind: 'text', text })))
+}
+
+/** The payload as a tree-able value, or null — `[DONE]`, a bare number, garbage. */
+function parseJsonObject(payload: string): object | null {
+  try {
+    const parsed: unknown = JSON.parse(payload)
+    return parsed !== null && typeof parsed === 'object' ? (parsed as object) : null
+  } catch {
+    return null
+  }
+}
+
+// A captured stream runs to thousands of frames, and a tree per frame is far
+// more DOM than a line of text. Only a first batch is mounted; the rest arrive
+// on demand. Copy and the raw toggle are unaffected — both work off the text.
+const FRAME_BATCH = 100
+
+function EventStreamView({ frames }: { frames: FramePart[][] }) {
+  const [limit, setLimit] = useState(FRAME_BATCH)
+  const remaining = frames.length - limit
+
+  return (
+    <div className="json-tree-block">
+      {frames.slice(0, limit).map((parts, i) => (
+        <div className="sse-frame" key={i}>
+          {parts.map((part, j) =>
+            part.kind === 'json' ? (
+              <div key={j}>
+                <div className="sse-frame-line">data:</div>
+                <div className="sse-frame-json">
+                  <JsonView
+                    value={part.value}
+                    style={githubLightTheme}
+                    collapsed={false}
+                    displayDataTypes={false}
+                    enableClipboard={false}
+                  />
+                </div>
+              </div>
+            ) : (
+              <div className="sse-frame-line" key={j}>
+                {part.text}
+              </div>
+            ),
+          )}
+        </div>
+      ))}
+      {remaining > 0 && (
+        <button className="copy-btn sse-more" onClick={() => setLimit((n) => n + FRAME_BATCH)}>
+          Show more ({remaining} {remaining === 1 ? 'frame' : 'frames'} left)
+        </button>
+      )}
+    </div>
+  )
+}
+
 function CopyButton({ text }: { text: string }) {
   const [copied, setCopied] = useState(false)
   function copy() {
@@ -122,17 +216,20 @@ function BodyBlock({
   const activeBody = showingOriginal ? originalBody ?? null : body
   const activeEncoding = showingOriginal ? originalBodyEncoding ?? 'utf8' : encoding
 
-  // Beautified once per body, not once per render: a captured token stream runs
-  // to megabytes, and toggling the view must not reformat it again.
-  const eventStream = useMemo(
-    () =>
-      activeBody !== null &&
-      activeEncoding !== 'base64' &&
-      looksLikeEventStream(activeBody, contentType)
-        ? beautifyEventStream(activeBody)
-        : null,
-    [activeBody, activeEncoding, contentType],
-  )
+  // Beautified and split into frames once per body, not once per render: a
+  // captured token stream runs to megabytes, and toggling the view or revealing
+  // another batch of frames must not parse it again.
+  const eventStream = useMemo(() => {
+    if (
+      activeBody === null ||
+      activeEncoding === 'base64' ||
+      !looksLikeEventStream(activeBody, contentType)
+    ) {
+      return null
+    }
+    const text = beautifyEventStream(activeBody)
+    return { text, frames: parseEventStream(activeBody) }
+  }, [activeBody, activeEncoding, contentType])
 
   const sourceToggle = wasRewritten ? (
     <button
@@ -174,7 +271,8 @@ function BodyBlock({
   const treeable = isJson && parsed !== null && typeof parsed === 'object'
   const formatted = view === 'formatted'
   const displayText =
-    eventStream !== null && formatted ? eventStream : isJson ? pretty : activeBody
+    eventStream !== null && formatted ? eventStream.text : isJson ? pretty : activeBody
+  const showFrames = eventStream !== null && formatted
   const showTree = treeable && formatted
   // The toggle is named for the view it switches to.
   const toggleLabel = formatted ? 'Raw' : eventStream !== null ? 'Beautify' : 'Tree'
@@ -203,7 +301,9 @@ function BodyBlock({
           Showing <strong>{source}</strong> body
         </div>
       )}
-      {showTree ? (
+      {showFrames ? (
+        <EventStreamView key={source} frames={eventStream.frames} />
+      ) : showTree ? (
         <div className="json-tree-block">
           <JsonView
             value={parsed as object}

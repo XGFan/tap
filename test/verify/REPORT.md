@@ -1,6 +1,6 @@
 # Gateway E2E Verification Report
 
-Generated: 2026-09-17T11:46:46.304Z
+Generated: 2026-09-17T14:16:10.238Z
 
 ## Summary
 
@@ -61,14 +61,14 @@ status=200 body={"ok":true,"echo":{"x":1}} content-type=application/json
 ### C2a — SSE streaming low-latency + capture
 **✅ PASS**
 
-firstByteMs=104 events=true jsonl.streaming=true bodyExcerpt="data: {\"i\":0}\n\ndata: {\"i\":1}\n\ndata: {\"i\":2}\n\ndata: [DONE]\n\n"
+firstByteMs=102 events=true jsonl.streaming=true bodyExcerpt="data: {\"i\":0}\n\ndata: {\"i\":1}\n\ndata: {\"i\":2}\n\ndata: [DONE]\n\n"
 
 ---
 
 ### C2b — Gemini-stream low-latency + capture
 **✅ PASS**
 
-firstByteMs=3 bodyOk=true jsonl.streaming=true
+firstByteMs=2 bodyOk=true jsonl.streaming=true
 
 ---
 
@@ -82,14 +82,14 @@ authorization=kept host=localhost:9090 client-Connection-not-echoed=true (undici
 ### C4 — JSONL integrity
 **✅ PASS**
 
-10 new lines written, all valid ExchangeRecord shape. Sample id=01M2QK0Q11ER1D4XZ2QN0ANPJ2
+10 new lines written, all valid ExchangeRecord shape. Sample id=01M2QVJ7ZMZHQ3AY1VTTHKGHHD
 
 ---
 
 ### C5 — Runtime config no-restart
 **✅ PASS**
 
-PID=75244 unchanged, request hit :9091, config.json baseUrl="http://localhost:9091"
+PID=42460 unchanged, request hit :9091, config.json baseUrl="http://localhost:9091"
 
 ---
 
@@ -138,7 +138,7 @@ status=200 clientBytes=6 bodyDecodable=false bodyEncoding=base64
 ### AR1 — Timeout reaping: /hang reaped, /sse NOT reaped
 **✅ PASS**
 
-/hang: status=0 elapsed=2506ms error="upstream_timeout" reaped=true; /sse: completed=true; gateway alive=true
+/hang: status=0 elapsed=2501ms error="upstream_timeout" reaped=true; /sse: completed=true; gateway alive=true
 
 ---
 
@@ -194,7 +194,7 @@ upstream saw key "/json?key=AIzaSyD-abcdefghijklmnopqrstuvwxyz1234567&model=gpt-
 ### RD3 — Response headers masked, client copy untouched
 **✅ PASS**
 
-client set-cookie carries real value (writeResponseHead unaffected); log response.headers={"content-type":"application/json","content-length":"11","set-cookie":"session=sess-a***2345; Path=***; HttpOnly","authorization":"Bearer resp-a***2345","date":"Thu, 17 Sep 2026 11:46:34 GMT","connection":"keep-alive","keep-alive":"timeout=5"}
+client set-cookie carries real value (writeResponseHead unaffected); log response.headers={"content-type":"application/json","content-length":"11","set-cookie":"session=sess-a***2345; Path=***; HttpOnly","authorization":"Bearer resp-a***2345","date":"Thu, 17 Sep 2026 14:15:58 GMT","connection":"keep-alive","keep-alive":"timeout=5"}
 
 ---
 
@@ -285,14 +285,14 @@ control tool_calls=[]; hello tool_calls=[{"type":"function","function":{"name":"
 ### SHOW2 — time -> {{now}} live timestamp in forwarded request
 **✅ PASS**
 
-control upstream echo={"q":"hello world"}; rewritten upstream echo={"q":"what 2026-09-17 19:46:43 is it"}
+control upstream echo={"q":"hello world"}; rewritten upstream echo={"q":"what 2026-09-17 22:16:06 is it"}
 
 ---
 
 ### TS1 — Streaming: TTFT distinct from duration, usage merged, rate over decode window
 **✅ PASS**
 
-stats={"ttftMs":121,"inputTokens":25,"outputTokens":120,"tokensPerSecond":655.7} durationMs=304
+stats={"ttftMs":122,"inputTokens":25,"outputTokens":120,"tokensPerSecond":659.3} durationMs=304
 
 ---
 
@@ -313,5 +313,5 @@ stats={"ttftMs":102,"inputTokens":null,"outputTokens":null,"tokensPerSecond":nul
 ### TS4 — Log summary API carries stats
 **✅ PASS**
 
-summary.stats={"ttftMs":121,"inputTokens":25,"outputTokens":120,"tokensPerSecond":655.7}
+summary.stats={"ttftMs":122,"inputTokens":25,"outputTokens":120,"tokensPerSecond":659.3}
 

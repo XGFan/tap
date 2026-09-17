@@ -1,7 +1,7 @@
 /**
  * ui.mjs — Browser verification for the redaction banner gate (AC5), the
  * per-exchange measurement readout (TS-UI), and the detail modal's layout and
- * beautified event-stream body.
+ * framed event-stream body.
  *
  * Separate from run.mjs on purpose: run.mjs must stay dependency-free and
  * headless, while this drives a real browser. The banner gate is a DOM-level
@@ -134,10 +134,11 @@ function readResponseBody() {
       "var panes=document.querySelectorAll('.log-detail-modal .pane');" +
       "var p=panes[panes.length-1];" +
       "if(!p)return{found:false};" +
-      "var pre=p.querySelector('.code-block pre');" +
+      "var box=p.querySelector('.code-block pre, .json-tree-block');" +
       "var labels=Array.prototype.map.call(p.querySelectorAll('.body-section-label button')," +
       "function(b){return b.textContent.trim()});" +
-      "return{found:true,text:pre?pre.textContent:null,labels:labels}" +
+      "return{found:true,text:box?box.textContent:null,frames:p.querySelectorAll('.sse-frame').length," +
+      "labels:labels}" +
       "})())",
   );
   return JSON.parse(JSON.parse(raw));
@@ -322,25 +323,30 @@ async function main() {
       fail('UI6', 'Close button overlaps nothing', `overlapped by ${JSON.stringify(overlap.hits)}`);
     }
 
-    // UI7 — the captured event stream reads as beautified frames by default,
-    // and the toggle puts the recorded bytes back.
+    // UI7 — the captured event stream reads as frames whose JSON payload is a
+    // tree (one frame per event, `data:` no longer raw text), and the toggle
+    // puts the recorded bytes back.
     const beautified = readResponseBody();
     if (!beautified.found || beautified.text === null) {
-      fail('UI7', 'SSE body beautified, toggle restores raw',
+      fail('UI7', 'SSE frames render JSON trees, toggle restores raw',
         `response pane body not rendered: ${JSON.stringify(beautified)}`);
-    } else if (!beautified.text.includes('"type": "message_start"') ||
-        !beautified.text.includes('event: message_start')) {
-      fail('UI7', 'SSE body beautified, toggle restores raw',
-        `not beautified: ${JSON.stringify(beautified.text.slice(0, 160))} labels=${JSON.stringify(beautified.labels)}`);
+    } else if (beautified.frames !== 5 || !beautified.text.includes('event: message_start') ||
+        !beautified.text.includes('message_start') ||
+        beautified.text.includes('data: {"type":"message_start"')) {
+      fail('UI7', 'SSE frames render JSON trees, toggle restores raw',
+        `not framed: frames=${beautified.frames} ` +
+        `${JSON.stringify(beautified.text.slice(0, 160))} labels=${JSON.stringify(beautified.labels)}`);
     } else {
       toggleResponseFormat();
       await sleep(300);
       const rawBody = readResponseBody();
-      if (rawBody.text !== null && rawBody.text.includes('data: {"type":"message_start"')) {
-        pass('UI7', 'SSE body beautified, toggle restores raw',
-          `beautified=${JSON.stringify(beautified.text.slice(0, 80))} raw=${JSON.stringify(rawBody.text.slice(0, 80))}`);
+      if (rawBody.text !== null && rawBody.frames === 0 &&
+          rawBody.text.includes('data: {"type":"message_start"')) {
+        pass('UI7', 'SSE frames render JSON trees, toggle restores raw',
+          `frames=${beautified.frames} tree=${JSON.stringify(beautified.text.slice(0, 80))} ` +
+          `raw=${JSON.stringify(rawBody.text.slice(0, 80))}`);
       } else {
-        fail('UI7', 'SSE body beautified, toggle restores raw',
+        fail('UI7', 'SSE frames render JSON trees, toggle restores raw',
           `toggle did not restore raw: ${JSON.stringify(rawBody)}`);
       }
     }
